@@ -812,10 +812,17 @@ class DataProto:
             Iterator: an iterator that yields a mini-batch data at a time. The total number of iteration
                 steps is ``self.batch.batch_size * epochs // mini_batch_size``
         """
-        assert self.batch.batch_size[0] % mini_batch_size == 0, f"{self.batch.batch_size[0]} % {mini_batch_size} != 0"
+        # assert self.batch.batch_size[0] % mini_batch_size == 0, f"{self.batch.batch_size[0]} % {mini_batch_size} != 0"
+        assert self.batch.batch_size[0] >= mini_batch_size, f"mini_batch_size {mini_batch_size} cannot be larger than the batch size {self.batch.batch_size[0]}"
         # we can directly create a dataloader from TensorDict
         if dataloader_kwargs is None:
             dataloader_kwargs = {}
+
+        # drop_last is set to True to ensure that all mini-batches have the same size, which is important for distributed training.
+        # If the batch size is not divisible by mini_batch_size, the last few samples will be dropped in each epoch.
+        if self.batch.batch_size[0] % mini_batch_size != 0:
+            dataloader_kwargs["drop_last"] = True
+            dataloader_kwargs["shuffle"] = True
 
         if seed is not None:
             generator = torch.Generator()
