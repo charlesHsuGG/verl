@@ -113,33 +113,8 @@ class DataParallelPPOActor(BasePPOActor):
                 f"{self.use_fused_kernels=} or {self.use_prefix_grouper=} for now."
             )
 
-    def _update_teacher_ema(self) -> None:
-        self_distillation_cfg = getattr(self.config, "self_distillation", None)
-        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-        if not self_distillation_cfg or loss_mode != "sdpo":
-            return
-        teacher_regularization = self._resolve_teacher_regularization(self_distillation_cfg)
-        if teacher_regularization != "ema":
-            return
-        teacher_update_rate = self._resolve_teacher_update_rate(self_distillation_cfg)
-        if teacher_update_rate == 0.0:
-            return
-        if self.teacher_module is None or self.teacher_module is self.actor_module:
-            raise ValueError("EMA teacher requires a separate teacher_module in the actor worker.")
-        with torch.no_grad():
-            for teacher_param, student_param in zip(
-                self.teacher_module.parameters(),
-                self.actor_module.parameters(),
-            ):
-                student_data = student_param.data.to(device=teacher_param.device)
-                teacher_param.data.mul_(1.0 - teacher_update_rate).add_(student_data, alpha=teacher_update_rate)
-
-    def _update_teacher(self) -> None:
-        """Update teacher state after optimizer step based on configured regularization mode."""
-        self._update_teacher_ema()
-
     @staticmethod
-    def _resolve_teacher_regularization(self_distillation_cfg) -> str:
+    def resolve_teacher_regularization(self_distillation_cfg) -> str:
         teacher_regularization = getattr(self_distillation_cfg, "teacher_regularization", "ema")
         canonical_regularization = {
             "ema": "ema",
@@ -157,11 +132,36 @@ class DataParallelPPOActor(BasePPOActor):
         return resolved
 
     @staticmethod
-    def _resolve_teacher_update_rate(self_distillation_cfg) -> float:
+    def resolve_teacher_update_rate(self_distillation_cfg) -> float:
         # teacher_update_rate is the new canonical name. ema_update_rate remains as backward-compatible alias.
         teacher_update_rate = getattr(self_distillation_cfg, "teacher_update_rate", None)
         legacy_ema_update_rate = getattr(self_distillation_cfg, "ema_update_rate", 0.05)
         return float(legacy_ema_update_rate if teacher_update_rate is None else teacher_update_rate)
+
+    def _update_teacher_ema(self) -> None:
+        self_distillation_cfg = getattr(self.config, "self_distillation", None)
+        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+        if not self_distillation_cfg or loss_mode != "sdpo":
+            return
+        teacher_regularization = self.resolve_teacher_regularization(self_distillation_cfg)
+        if teacher_regularization != "ema":
+            return
+        teacher_update_rate = self.resolve_teacher_update_rate(self_distillation_cfg)
+        if teacher_update_rate == 0.0:
+            return
+        if self.teacher_module is None or self.teacher_module is self.actor_module:
+            raise ValueError("EMA teacher requires a separate teacher_module in the actor worker.")
+        with torch.no_grad():
+            for teacher_param, student_param in zip(
+                self.teacher_module.parameters(),
+                self.actor_module.parameters(),
+            ):
+                student_data = student_param.data.to(device=teacher_param.device)
+                teacher_param.data.mul_(1.0 - teacher_update_rate).add_(student_data, alpha=teacher_update_rate)
+
+    def _update_teacher(self) -> None:
+        """Update teacher state after optimizer step based on configured regularization mode."""
+        self._update_teacher_ema()
 
     @staticmethod
     def _has_non_empty_multi_modal_inputs(multi_modal_inputs) -> bool:
@@ -186,13 +186,13 @@ class DataParallelPPOActor(BasePPOActor):
 
     def _forward_micro_batch(
         self,
+        model: nn.Module,
         micro_batch: dict[str, torch.Tensor],
         temperature: float,
         calculate_entropy: bool = False,
         return_all_logps: bool = False,
         distill_topk: Optional[int] = None,
         topk_indices: Optional[torch.Tensor] = None,
-        module: Optional[nn.Module] = None,
     ) -> dict[str, torch.Tensor]:
         """
         Returns:
@@ -213,8 +213,6 @@ class DataParallelPPOActor(BasePPOActor):
         return_topk_indices = use_topk and topk_indices is None
         if (return_all_logps or use_topk) and self.use_fused_kernels:
             raise ValueError("Logit distillation requires disabling fused kernels.")
-
-        model = module or self.actor_module
 
         # PrefixGrouper path for shared-prefix optimization
         if self.use_prefix_grouper:
@@ -660,7 +658,7 @@ class DataParallelPPOActor(BasePPOActor):
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch, "pad_token_id": pad_token_id}
             with torch.no_grad():
                 outputs = self._forward_micro_batch(
-                    model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+                    self.actor_module, model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                 )
             log_probs_lst.append(outputs["log_probs"])
             if calculate_entropy:
@@ -712,8 +710,8 @@ class DataParallelPPOActor(BasePPOActor):
             missing = set(self_distillation_required_keys) - set(data.batch.keys())
             if missing:
                 raise ValueError(f"SDPO is enabled but required teacher keys are missing: {sorted(missing)}")
-            teacher_regularization = self._resolve_teacher_regularization(self_distillation_cfg) 
-            teacher_update_rate = self._resolve_teacher_update_rate(self_distillation_cfg)
+            teacher_regularization = self.resolve_teacher_regularization(self_distillation_cfg) 
+            teacher_update_rate = self.resolve_teacher_update_rate(self_distillation_cfg)
             if teacher_regularization == "trust_region":
                 if self.use_fused_kernels:
                     raise ValueError("SDPO trust-region teacher requires use_fused_kernels=False.")
@@ -819,6 +817,7 @@ class DataParallelPPOActor(BasePPOActor):
                         distill_topk = self_distillation_cfg.distillation_topk
                         return_all_logps = distill_topk is None
                     outputs = self._forward_micro_batch(
+                        self.actor_module,
                         model_inputs,
                         temperature=temperature,
                         calculate_entropy=calculate_entropy,
@@ -856,13 +855,12 @@ class DataParallelPPOActor(BasePPOActor):
                         teacher_model = trust_region_teacher or self.teacher_module or self.actor_module
                         with torch.no_grad():
                             teacher_outputs = self._forward_micro_batch(
-                                teacher_inputs,
+                                teacher_model, teacher_inputs,
                                 temperature=temperature,
                                 calculate_entropy=False,
                                 return_all_logps=return_all_logps,
                                 distill_topk=distill_topk,
                                 topk_indices=student_topk_indices,
-                                module=teacher_model,
                             )
                         teacher_log_prob = teacher_outputs["log_probs"]
                         teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None

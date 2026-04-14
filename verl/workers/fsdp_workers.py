@@ -970,10 +970,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self_distillation_cfg = self.config.actor.get("self_distillation", None)
                 loss_mode = self.config.actor.policy_loss.get("loss_mode", "vanilla")
                 if self_distillation_cfg is not None and loss_mode == "sdpo":
-                    teacher_regularization = self_distillation_cfg.get("teacher_regularization", "ema")
-                    teacher_update_rate = self_distillation_cfg.get(
-                        "teacher_update_rate", self_distillation_cfg.get("ema_update_rate", 0.05)
-                    )
+                    teacher_regularization = self.actor.resolve_teacher_regularization(self_distillation_cfg)
+                    teacher_update_rate = self.actor.resolve_teacher_update_rate(self_distillation_cfg)
                     if str(teacher_regularization).lower() in {"trust_region", "trust-region", "trustregion"}:
                         self.actor.teacher_module = TrustRegionTeacher(
                             ref_module=self.ref_module_fsdp,
