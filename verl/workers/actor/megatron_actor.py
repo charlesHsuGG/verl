@@ -29,6 +29,7 @@ import torch
 import torch.distributed
 from megatron.core import parallel_state as mpu
 from megatron.core.distributed import finalize_model_grads
+from megatron.core.transformer.module import MegatronModule
 
 # from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer import DistributedOptimizer
@@ -37,7 +38,7 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.core_algos import agg_loss, compute_self_distillation_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
@@ -57,11 +58,138 @@ from verl.utils.torch_functional import broadcast_dict_tensor
 from verl.workers.actor import BasePPOActor
 from verl.workers.config import MtpConfig
 
-__all__ = ["MegatronPPOActor"]
+__all__ = ["MegatronPPOActor", "McTrustRegionTeacher"]
 
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+
+class McTrustRegionTeacher(MegatronModule):
+    """Megatron-compatible Trust Region Teacher for SDPO.
+    
+    Adapts the trust region teacher to work with Megatron-LM's distributed training,
+    supporting pipeline parallelism, tensor parallelism, and other distributed features.
+    
+    This implementation is specifically designed for Megatron's forward-backward pass patterns
+    where models are structured as nn.ModuleList containing multiple pipeline stages.
+    
+    Args:
+        teacher_module (nn.ModuleList): Teacher model stages (frozen, used to compute baseline logits)
+        student_module (nn.ModuleList): Student model stages (trainable, updated during training)
+        mix_coef (float): Mixing coefficient in [0, 1] for interpolation between ref and student logits.
+                         0.0 = only use ref logits (no update)
+                         1.0 = only use student logits (standard training)
+                         0.0 < mix_coef < 1.0 = blend ref and student logits for trust-region regularization
+    
+    Example:
+        >>> from torch import nn
+        >>> 
+        >>> # In Megatron setup with pipeline parallelism
+        >>> teacher_module = nn.ModuleList([stage1, stage2, stage3])
+        >>> student_module = nn.ModuleList([stage1_student, stage2_student, stage3_student])
+        >>> teacher = McTrustRegionTeacher(
+        ...     teacher_module=teacher_module,
+        ...     student_module=student_module,
+        ...     mix_coef=0.1  # Small regularization coefficient
+        ... )
+    """
+
+    def __init__(self, ref_module: nn.ModuleList, student_module: nn.ModuleList, mix_coef: float = 0.1):
+        self.teacher_module = teacher_module
+        self.student_module = student_module
+        self.mix_coef = float(mix_coef)
+        
+        if not 0.0 <= self.mix_coef <= 1.0:
+            raise ValueError(f"mix_coef must be in [0, 1], got {self.mix_coef}")
+        
+        # Ensure both modules have the same structure
+        if len(self.teacher_module) != len(self.student_module):
+            raise ValueError(
+                f"teacher_module and student_module must have the same number of stages/chunks. "
+                f"Got {len(self.teacher_module)} vs {len(self.student_module)}"
+            )
+        
+        super().__init__(config=self.student_module.config)
+
+    @staticmethod
+    def _extract_logits(output) -> torch.Tensor:
+        """Extract logits from various output formats.
+        
+        Megatron models can return logits in different formats depending on configuration.
+        This method handles the most common formats.
+        
+        Args:
+            output: Model output in one of several possible formats:
+                   - torch.Tensor: Direct logits tensor
+                   - torch.nn.Module output with 'logits' attribute
+                   - Tuple where first element is logits
+                   - Dict with 'logits' key
+        
+        Returns:
+            torch.Tensor: Extracted logits tensor
+        
+        Raises:
+            ValueError: If output format is not recognized
+        """
+        if isinstance(output, torch.Tensor):
+            return output
+        if hasattr(output, "logits"):
+            return output.logits
+        if isinstance(output, tuple) and len(output) > 0:
+            return output[0]
+        if isinstance(output, dict) and "logits" in output:
+            return output["logits"]
+        raise ValueError(
+            f"Unsupported model output type for Megatron trust-region teacher. "
+            f"Expected Tensor, tuple, dict with 'logits', or object with 'logits' attribute, "
+            f"got {type(output)}"
+        )
+
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        """Forward pass that blends reference and student logits.
+        
+        This method is designed to work with Megatron's forward pass patterns where
+        the model processes data through multiple pipeline stages.
+        
+        The output logits are computed as:
+            output_logits = (1 - mix_coef) * teacher_logits + mix_coef * student_logits
+        
+        Where:
+        - When mix_coef = 0: output = teacher_logits (pure reference policy)
+        - When mix_coef = 1: output = student_logits (pure student policy)
+        - When 0 < mix_coef < 1: output is regularized between both policies
+        
+        Args:
+            *args: Positional arguments passed to both ref and student modules
+            **kwargs: Keyword arguments passed to both ref and student modules
+        
+        Returns:
+            torch.Tensor: Blended logits tensor with gradients flowing only to student_module
+        """
+        original_return_logits = kwargs.pop("return_logits", False)
+
+        # Detach teacher_module outputs to prevent gradients flowing to it
+        teacher_output = self.teacher_module(*args, **kwargs)
+        
+        # Keep student_module outputs to track gradients
+        student_output = self.student_module(*args, **kwargs)
+        
+        # Extract logits from both outputs
+        teacher_logits = self._extract_logits(teacher_output)
+        student_logits = self._extract_logits(student_output)
+        
+        # Ensure shapes match
+        if teacher_logits.shape != student_logits.shape:
+            raise RuntimeError(
+                f"Reference and student logits shapes must match for trust-region blending. "
+                f"Got ref: {teacher_logits.shape} vs student: {student_logits.shape}"
+            )
+        
+        blended_logits = torch.lerp(teacher_logits, student_logits, weight=self.mix_coef)
+
+        return blended_logits
 
 
 class MegatronPPOActor(BasePPOActor):
@@ -198,6 +326,56 @@ class MegatronPPOActor(BasePPOActor):
             config.megatron.sequence_parallel = False
         self.config = config
 
+    @staticmethod
+    def resolve_teacher_regularization(self_distillation_cfg) -> str:
+        teacher_regularization = getattr(self_distillation_cfg, "teacher_regularization", "ema")
+        canonical_regularization = {
+            "ema": "ema",
+            "trust_region": "trust_region",
+            "trust-region": "trust_region",
+            "trustregion": "trust_region",
+            "none": "none",
+        }
+        resolved = canonical_regularization.get(str(teacher_regularization).lower())
+        if resolved is None:
+            raise ValueError(
+                "teacher_regularization must be one of {'ema', 'trust_region', 'none'}, "
+                f"got {teacher_regularization}."
+            )
+        return resolved
+
+    @staticmethod
+    def resolve_teacher_update_rate(self_distillation_cfg) -> float:
+        # teacher_update_rate is the new canonical name. ema_update_rate remains as backward-compatible alias.
+        teacher_update_rate = getattr(self_distillation_cfg, "teacher_update_rate", None)
+        legacy_ema_update_rate = getattr(self_distillation_cfg, "ema_update_rate", 0.05)
+        return float(legacy_ema_update_rate if teacher_update_rate is None else teacher_update_rate)
+
+    def _update_teacher_ema(self) -> None:
+        self_distillation_cfg = getattr(self.config, "self_distillation", None)
+        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+        if not self_distillation_cfg or loss_mode != "sdpo":
+            return
+        teacher_regularization = self.resolve_teacher_regularization(self_distillation_cfg)
+        if teacher_regularization != "ema":
+            return
+        teacher_update_rate = self.resolve_teacher_update_rate(self_distillation_cfg)
+        if teacher_update_rate == 0.0:
+            return
+        if self.teacher_module is None or self.teacher_module is self.actor_module:
+            raise ValueError("EMA teacher requires a separate teacher_module in the actor worker.")
+        with torch.no_grad():
+            for teacher_param, student_param in zip(
+                self.teacher_module.parameters(),
+                self.actor_module.parameters(),
+            ):
+                student_data = student_param.data.to(device=teacher_param.device)
+                teacher_param.data.mul_(1.0 - teacher_update_rate).add_(student_data, alpha=teacher_update_rate)
+
+    def _update_teacher(self) -> None:
+        """Update teacher state after optimizer step based on configured regularization mode."""
+        self._update_teacher_ema()
+
     @GPUMemoryLogger(role="megatron actor", logger=logger)
     def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
@@ -257,7 +435,7 @@ class MegatronPPOActor(BasePPOActor):
             response_length = response.size(1)
             with torch.no_grad():
                 output = self.forward_backward_batch(
-                    data,
+                    self.actor_module, data,
                     forward_only=True,
                     post_process_fn=compute_logprobs_fn,
                     calculate_entropy=calculate_entropy,
@@ -327,6 +505,13 @@ class MegatronPPOActor(BasePPOActor):
                         revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
                         layers_topk_idx = layers_topk_idx[revert_indices]
                     layers_topk_idx = pp_gather(layers_topk_idx, self.tf_config)
+        else:
+            if "rollout_log_probs" in data.batch:
+                log_probs = data.batch['rollout_log_probs']
+            elif "old_log_probs" in data.batch:
+                log_probs = data.batch['old_log_probs']
+            else:
+                raise ValueError("Not found `rollout_log_probs` or `old_log_probs` field in data. Please recheck data field or set recompute_old_log_prob=True.")
         # add empty cache after each compute
         get_torch_device().empty_cache()
 
@@ -378,6 +563,16 @@ class MegatronPPOActor(BasePPOActor):
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys():
             select_keys.append("rollout_log_probs")
+        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+        self_distillation_enabled = loss_mode == "sdpo"
+        if self_distillation_enabled:
+            self_distillation_required_keys = [
+                "teacher_input_ids",
+                "teacher_attention_mask",
+                "teacher_position_ids",
+                "self_distillation_mask",
+            ]
+            select_keys.extend(self_distillation_required_keys)
         self.has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         # router replay
         if self.enable_routing_replay:
@@ -396,6 +591,7 @@ class MegatronPPOActor(BasePPOActor):
 
     def forward_backward_batch(
         self,
+        module: nn.ModuleList,
         data: DataProto,
         forward_only=False,
         post_process_fn=None,
@@ -404,12 +600,17 @@ class MegatronPPOActor(BasePPOActor):
         micro_batch_size=None,
         max_token_len=None,
         mini_batch_size=None,
+        return_all_logps: bool = False,
     ):
         """
         We assume:
         - The model takes input: (input_ids, attention_mask, position_ids). No rmpad for the input
         - The communication shape is (total_nnz_pad_to_sp // tp_size, 1, hidden_size) if sequence parallel is enabled
         """
+        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+        if return_all_logps and self.use_fused_kernels:
+            raise ValueError("Logit distillation requires disabling fused kernels.")
+
         # broadcast from last pp rank to all other pp ranks
         # TODO: actually, we just need to control the sampling order.
         data.to(get_device_id())
@@ -510,40 +711,65 @@ class MegatronPPOActor(BasePPOActor):
                 entropy_coeff = self.config.entropy_coeff
                 loss_agg_mode = self.config.loss_agg_mode
 
-                loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-
-                policy_loss_fn = get_policy_loss_fn(loss_mode)
-
                 # Extract pre-computed rollout correction weights if present
                 # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                 rollout_is_weights = data.get("rollout_is_weights", None)
-                pg_loss, pg_metrics = policy_loss_fn(
-                    old_log_prob=old_log_prob,
-                    log_prob=log_prob,
-                    advantages=advantages,
-                    response_mask=response_mask,
-                    loss_agg_mode=loss_agg_mode,
-                    config=self.config,
-                    rollout_is_weights=rollout_is_weights,
-                )
-                stats.update(pg_metrics)
 
-                # Skip if using bypass_mode loss (metrics already computed in pg_metrics)
-                rollout_log_prob = data.get("rollout_log_probs", None)
-                if loss_mode != "bypass_mode" and rollout_log_prob is not None:
-                    # Compute metrics using CURRENT policy π_θ vs π_rollout
-                    # Tracks evolving off-policy gap as π_θ updates during mini-batch training
-                    from verl.trainer.ppo.rollout_corr_helper import compute_rollout_corr_metrics_from_logprobs
-
-                    rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
-                        log_prob=log_prob,
-                        rollout_log_prob=rollout_log_prob,
+                if loss_mode == "sdpo":
+                    self_distillation_cfg = getattr(self.config, "self_distillation", None)
+                    if self_distillation_cfg is None:
+                        raise ValueError("SDPO is enabled but self_distillation config is missing.")
+                    
+                    assert "teacher_log_probs" in data, "SDPO must have `teacher_log_probs` in field."
+                    teacher_log_probs = data["teacher_log_probs"]
+                    teacher_all_logps, student_all_logps = data.get("teacher_all_logps", None), data.get("all_logps", None)
+                    self_distillation_mask = data.get("self_distillation_mask", None)
+                    
+                    pg_loss, pg_metrics = compute_self_distillation_loss(
+                        student_log_probs=log_prob,
+                        teacher_log_probs=teacher_log_probs,
                         response_mask=response_mask,
+                        self_distillation_config=self_distillation_cfg,
+                        old_log_probs=old_log_prob,
+                        student_all_log_probs=student_all_logps,
+                        teacher_all_log_probs=teacher_all_logps,
+                        self_distillation_mask=self_distillation_mask,
+                        loss_agg_mode=loss_agg_mode,
+                        rollout_is_weights=rollout_is_weights,
                     )
-                    stats.update(rollout_corr_metrics)
+                    stats.update(pg_metrics)
+                    stats["actor/pg_loss"] = pg_loss.detach().item()
+                    policy_loss = pg_loss
+                else:
+                    policy_loss_fn = get_policy_loss_fn(loss_mode)
 
-                stats["actor/pg_loss"] = pg_loss.detach().item()
-                policy_loss = pg_loss
+                    pg_loss, pg_metrics = policy_loss_fn(
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        loss_agg_mode=loss_agg_mode,
+                        config=self.config,
+                        rollout_is_weights=rollout_is_weights,
+                    )
+                    stats.update(pg_metrics)
+
+                    # Skip if using bypass_mode loss (metrics already computed in pg_metrics)
+                    rollout_log_prob = data.get("rollout_log_probs", None)
+                    if loss_mode != "bypass_mode" and rollout_log_prob is not None:
+                        # Compute metrics using CURRENT policy π_θ vs π_rollout
+                        # Tracks evolving off-policy gap as π_θ updates during mini-batch training
+                        from verl.trainer.ppo.rollout_corr_helper import compute_rollout_corr_metrics_from_logprobs
+
+                        rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
+                            log_prob=log_prob,
+                            rollout_log_prob=rollout_log_prob,
+                            response_mask=response_mask,
+                        )
+                        stats.update(rollout_corr_metrics)
+
+                    stats["actor/pg_loss"] = pg_loss.detach().item()
+                    policy_loss = pg_loss
 
             if calculate_entropy:
                 entropy = output["entropy"][:, -response_length - 1 : -1].contiguous()
@@ -669,6 +895,8 @@ class MegatronPPOActor(BasePPOActor):
                     log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
                     log_probs = log_probs.masked_fill(~label_mask, 0.0)
                     ret["log_probs"] = log_probs
+                    if compute_all_logps:
+                        ret["all_logps"] = torch.log_softmax(logits_bak, dim=-1)
                     return ret
 
                 logits_processor_args = {"label": label, "label_mask": label_mask}
@@ -707,7 +935,7 @@ class MegatronPPOActor(BasePPOActor):
             return output, partial(loss_func, data=batch, meta_info=meta_info)
 
         # batch should be a list of batches inside micro-batches
-        batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
+        batch_generator = make_batch_generator(micro_batches, vpp_size=len(module))
 
         # TODO: we may use the new schedule instead
         # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
@@ -715,7 +943,7 @@ class MegatronPPOActor(BasePPOActor):
             losses_reduced = forward_backward_func(
                 forward_step_func=forward_step,
                 data_iterator=batch_generator,
-                model=self.actor_module,
+                model=module,
                 num_microbatches=n_micro_batch,
                 seq_length=total_seqlen,  # no use when input_shapes was set
                 micro_batch_size=1,  # no use when input_shapes was set
@@ -725,7 +953,7 @@ class MegatronPPOActor(BasePPOActor):
             losses_reduced = forward_backward_func(
                 forward_step_func=forward_step,
                 data_iterator=batch_generator,
-                model=self.actor_module,
+                model=module,
                 num_microbatches=n_micro_batch,
                 seq_length=total_seqlen,  # in use for pp = 1
                 micro_batch_size=1,  # in use for pp = 1
@@ -743,8 +971,8 @@ class MegatronPPOActor(BasePPOActor):
             losses_reduced["indices"] = indices
         if RouterReplayHelper.is_r2_record_action(self.tf_config):
             if self.tf_config.virtual_pipeline_model_parallel_size is not None:
-                # config = self.actor_module[0].module.module.config
-                vp_size = len(self.actor_module)
+                # config = module[0].module.module.config
+                vp_size = len(module)
                 microbatch_group_size_per_vp_stage = self.tf_config.microbatch_group_size_per_vp_stage
                 bs = n_micro_batch
                 losses_reduced["mini_layer_topk_idx_tensor"] = reorder_and_merge_vpp_layers(
@@ -776,6 +1004,32 @@ class MegatronPPOActor(BasePPOActor):
             and users have to combine the output in each dp rank manually.
 
         """
+        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+        self_distillation_enabled = loss_mode == "sdpo"
+        self_distillation_cfg = getattr(self.config, "self_distillation", None)
+        teacher_regularization = "ema"
+        teacher_update_rate = 0.0
+        teacher_update_rate = 0.0
+        trust_region_teacher: Optional[nn.Module] = None
+        if self_distillation_enabled:
+            teacher_regularization = self.resolve_teacher_regularization(self_distillation_cfg) 
+            teacher_update_rate = self.resolve_teacher_update_rate(self_distillation_cfg)
+            if teacher_regularization == "trust_region":
+                if self.use_fused_kernels:
+                    raise ValueError("SDPO trust-region teacher requires use_fused_kernels=False.")
+                if self.teacher_module is None:
+                    raise ValueError("Trust-region teacher requires a reference teacher_module.")
+                if isinstance(self.teacher_module, McTrustRegionTeacher):
+                    trust_region_teacher = self.teacher_module
+                else:
+                    if self.teacher_module is self.actor_module:
+                        raise ValueError("Trust-region teacher requires a separate reference teacher_module.")
+                    trust_region_teacher = McTrustRegionTeacher(
+                        teacher_module=self.teacher_module,
+                        student_module=self.actor_module,
+                        mix_coef=teacher_update_rate,
+                    )
+
         metrics = {}
         for data in dataloader:
             if self.config.router_replay.mode in ["R2", "R3"]:
@@ -794,14 +1048,99 @@ class MegatronPPOActor(BasePPOActor):
             max_token_len = None
             if self.config.use_dynamic_bsz:
                 max_token_len = self.config.ppo_max_token_len_per_gpu * self.config.megatron.context_parallel_size
-            metric_micro_batch = self.forward_backward_batch(
-                data,
-                calculate_entropy=calculate_entropy,
-                use_dynamic_bsz=self.config.use_dynamic_bsz,
-                micro_batch_size=micro_batch_size,
-                max_token_len=max_token_len,
-                mini_batch_size=self.config.ppo_mini_batch_size,
-            )
+
+            if self_distillation_enabled:
+
+                select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+            
+                if self.enable_routing_replay and self.config.router_replay.mode == "R3":
+                    assert "routed_experts" in data.batch.keys(), "routed_experts must be in data.batch.keys()"
+                    select_keys.append("routed_experts")
+
+                return_all_logps = False
+                if self_distillation_enabled and self_distillation_cfg.full_logit_distillation:
+                    return_all_logps = True
+
+                def compute_logprobs_fn(output, data, use_dynamic_bsz=False, indices=None):
+                    if return_all_logps:
+                        return {"log_probs": output["log_probs"], "all_logps": output["all_logps"]}
+                    return {"log_probs": output["log_probs"]}
+                    
+                batch = data.select(batch_keys=select_keys).batch
+                input_ids = batch["input_ids"]
+                batch_size = input_ids.size(0)
+                response = batch["responses"]
+                response_length = response.size(1)
+                with torch.no_grad():
+                    teacher_output = self.forward_backward_batch(
+                        trust_region_teacher or self.teacher_module, data,
+                        forward_only=True,
+                        calculate_entropy=False,
+                        post_process_fn=compute_logprobs_fn,
+                        use_dynamic_bsz=self.config.use_dynamic_bsz,
+                        micro_batch_size=micro_batch_size,
+                        max_token_len=max_token_len,
+                        return_all_logps=return_all_logps
+                    )
+                    if mpu.is_pipeline_last_stage(ignore_virtual=True):
+                        teacher_log_probs = [o["log_probs"] for o in teacher_output["output"]]
+                        if return_all_logps:
+                            teacher_all_logps = [o["all_logps"] for o in teacher_output["output"]]
+                        if use_dynamic_bsz:
+                            teacher_indices = teacher_output["indices"]
+                            teacher_indices = list(itertools.chain.from_iterable(teacher_indices))
+                            assert len(teacher_indices) == teacher_log_probs.size(0), f"{len(teacher_indices)} vs. {teacher_log_probs.size()}"
+                            revert_teacher_indices = torch.tensor(get_reverse_idx(teacher_indices), dtype=torch.long)
+                            teacher_log_probs = teacher_log_probs[revert_teacher_indices]
+                            if return_all_logps:
+                                teacher_all_logps = teacher_all_logps[revert_teacher_indices]
+                    else:
+                        teacher_log_probs = torch.empty(
+                            size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device
+                        )
+                        if return_all_logps:
+                            teacher_all_logps = torch.empty(
+                                size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device
+                            )
+                    teacher_log_probs = teacher_log_probs.to(get_device_id())
+                    # broadcast across pp ranks
+                    torch.distributed.broadcast(
+                        tensor=teacher_log_probs,
+                        src=mpu.get_pipeline_model_parallel_last_rank(),
+                        group=mpu.get_pipeline_model_parallel_group(),
+                        async_op=False,
+                    )
+                    teacher_log_probs = teacher_log_probs.to("cpu")
+                    data.batch["teacher_log_probs"] = teacher_log_probs
+                    if return_all_logps:
+                        teacher_all_logps = teacher_all_logps.to(get_device_id())
+                        torch.distributed.broadcast(
+                            tensor=teacher_all_logps,
+                            src=mpu.get_pipeline_model_parallel_last_rank(),
+                            group=mpu.get_pipeline_model_parallel_group(),
+                            async_op=False,
+                        )
+                        teacher_all_logps = teacher_all_logps.to("cpu")
+                        data.batch["teacher_all_logps"] = teacher_all_logps
+
+                metric_micro_batch = self.forward_backward_batch(
+                    self.actor_module, data,
+                    calculate_entropy=calculate_entropy,
+                    use_dynamic_bsz=self.config.use_dynamic_bsz,
+                    micro_batch_size=micro_batch_size,
+                    max_token_len=max_token_len,
+                    mini_batch_size=self.config.ppo_mini_batch_size,
+                    return_all_logps=return_all_logps
+                )
+            else:
+                metric_micro_batch = self.forward_backward_batch(
+                    self.actor_module, data,
+                    calculate_entropy=calculate_entropy,
+                    use_dynamic_bsz=self.config.use_dynamic_bsz,
+                    micro_batch_size=micro_batch_size,
+                    max_token_len=max_token_len,
+                    mini_batch_size=self.config.ppo_mini_batch_size,
+                )
 
             mtp_losses = metric_micro_batch.get("mtp_losses", None)
             if mtp_losses is not None:

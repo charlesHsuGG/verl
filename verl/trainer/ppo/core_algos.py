@@ -1206,8 +1206,6 @@ def compute_self_distillation_loss(
     old_log_probs: Optional[torch.Tensor] = None,
     student_all_log_probs: Optional[torch.Tensor] = None,
     teacher_all_log_probs: Optional[torch.Tensor] = None,
-    student_topk_log_probs: Optional[torch.Tensor] = None,
-    teacher_topk_log_probs: Optional[torch.Tensor] = None,
     self_distillation_mask: Optional[torch.Tensor] = None,
     loss_agg_mode: str = "token-mean",
     rollout_is_weights: Optional[torch.Tensor] = None,
@@ -1222,8 +1220,6 @@ def compute_self_distillation_loss(
         old_log_probs: Optional old policy log-probabilities for IS clipping.
         student_all_log_probs: Optional student full-vocab log-probabilities for full-logit distillation.
         teacher_all_log_probs: Optional teacher full-vocab log-probabilities for full-logit distillation.
-        student_topk_log_probs: Optional student top-k log-probabilities for top-k distillation.
-        teacher_topk_log_probs: Optional teacher top-k log-probabilities for top-k distillation.
         self_distillation_mask: Optional per-sample SDPO mask; masked samples are excluded from distillation.
         loss_agg_mode: Loss aggregation mode.
         rollout_is_weights: Optional rollout correction IS weights.
@@ -1242,39 +1238,11 @@ def compute_self_distillation_loss(
 
     distill_variant = "rkl_token"
     if self_distillation_config.full_logit_distillation:
-        use_topk = self_distillation_config.distillation_topk is not None
-        distill_variant = "full_logit_topk" if use_topk else "full_logit_all"
-        if use_topk:
-            if student_topk_log_probs is None or teacher_topk_log_probs is None:
-                raise ValueError("top-k distillation requires student_topk_log_probs and teacher_topk_log_probs.")
-
-            def add_tail(log_probs: torch.Tensor) -> torch.Tensor:
-                # Compute tail log-probability using logsumexp for numerical stability
-                # log(1 - sum(p_i)) = log(1 - exp(log_sum_exp(log(p_i))))
-                log_s = torch.logsumexp(log_probs, dim=-1, keepdim=True)
-                # Clamp to avoid log_s >= 0 (sum(probs) >= 1).
-                log_s = torch.clamp(log_s, max=-1e-7)
-                # 1 - exp(x) = -(exp(x) - 1) with better precision from expm1.
-                tail_log = torch.log(-torch.expm1(log_s))
-                return torch.cat([log_probs, tail_log], dim=-1)
-
-            def renorm_topk_log_probs(logp: torch.Tensor) -> torch.Tensor:
-                logZ = torch.logsumexp(logp, dim=-1, keepdim=True)
-                return logp - logZ
-
-            student_distill_log_probs = student_topk_log_probs
-            teacher_distill_log_probs = teacher_topk_log_probs
-            if self_distillation_config.distillation_add_tail:
-                student_distill_log_probs = add_tail(student_distill_log_probs)
-                teacher_distill_log_probs = add_tail(teacher_distill_log_probs)
-            else:
-                student_distill_log_probs = renorm_topk_log_probs(student_distill_log_probs)
-                teacher_distill_log_probs = renorm_topk_log_probs(teacher_distill_log_probs)
-        else:
-            if student_all_log_probs is None or teacher_all_log_probs is None:
-                raise ValueError("full_logit_distillation requires student_all_log_probs and teacher_all_log_probs.")
-            student_distill_log_probs = student_all_log_probs
-            teacher_distill_log_probs = teacher_all_log_probs
+        distill_variant = "full_logit_all"
+        if student_all_log_probs is None or teacher_all_log_probs is None:
+            raise ValueError("full_logit_distillation requires student_all_log_probs and teacher_all_log_probs.")
+        student_distill_log_probs = student_all_log_probs
+        teacher_distill_log_probs = teacher_all_log_probs
 
         kl_type_code = 0.0
         if self_distillation_config.alpha == 0.0:
@@ -1336,14 +1304,8 @@ def compute_self_distillation_loss(
             "self_distillation/loss": loss.detach().item(),
             "self_distillation/alpha": float(self_distillation_config.alpha),
             "self_distillation/full_logit_distillation": float(self_distillation_config.full_logit_distillation),
-            "self_distillation/use_topk": float(self_distillation_config.distillation_topk is not None),
-            "self_distillation/topk_value": float(self_distillation_config.distillation_topk or 0),
             "self_distillation/mask_fraction": loss_mask.float().mean().item(),
-            "self_distillation/variant_code": {
-                "rkl_token": 3.0,
-                "full_logit_topk": 1.0,
-                "full_logit_all": 0.0,
-            }[distill_variant],
+            "self_distillation/variant_code": {"rkl_token": 3.0, "full_logit_all": 0.0,}[distill_variant],
             "self_distillation/kl_type_code": (
                 kl_type_code if self_distillation_config.full_logit_distillation else 3.0
             ),

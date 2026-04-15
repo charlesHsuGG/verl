@@ -120,8 +120,6 @@ actor_rollout_ref:
     self_distillation:
       _target_: verl.workers.config.SelfDistillationConfig
       full_logit_distillation: true
-      distillation_topk: 100
-      distillation_add_tail: true
       alpha: 0.5
       success_reward_threshold: 0.5
       teacher_regularization: ema

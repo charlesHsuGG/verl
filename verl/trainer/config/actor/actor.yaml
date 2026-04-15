@@ -249,13 +249,7 @@ self_distillation:
   # Distillation is enabled when policy_loss.loss_mode == "sdpo"
 
   # Whether to use full-logit KL distillation
-  full_logit_distillation: True
-
-  # Top-k for logit distillation; null uses full logits
-  distillation_topk: 100
-
-  # Whether to add a tail bucket when using distillation_topk
-  distillation_add_tail: True
+  full_logit_distillation: False
 
   # KL interpolation coefficient: 0.0=forward KL, 1.0=reverse KL, in-between=JSD
   alpha: 0.5

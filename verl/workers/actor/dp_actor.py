@@ -191,8 +191,6 @@ class DataParallelPPOActor(BasePPOActor):
         temperature: float,
         calculate_entropy: bool = False,
         return_all_logps: bool = False,
-        distill_topk: Optional[int] = None,
-        topk_indices: Optional[torch.Tensor] = None,
     ) -> dict[str, torch.Tensor]:
         """
         Returns:
@@ -202,16 +200,10 @@ class DataParallelPPOActor(BasePPOActor):
                     entropys: (bs, response_len)
                 if calculate_sum_pi_squared is False:
                     sum_pi_squared: (bs, response_len)
-                if distill_topk or topk_indices is set:
-                    topk_logps: (bs, response_len, k)
-                    topk_indices: (bs, response_len, k)
         """
         calculate_sum_pi_squared = self.config.get("calculate_sum_pi_squared", False)
         sum_pi_squared_checkpointing = self.config.get("sum_pi_squared_checkpointing", False)
-        use_topk = distill_topk is not None or topk_indices is not None
-        compute_all_logps = return_all_logps and not use_topk
-        return_topk_indices = use_topk and topk_indices is None
-        if (return_all_logps or use_topk) and self.use_fused_kernels:
+        if return_all_logps and self.use_fused_kernels:
             raise ValueError("Logit distillation requires disabling fused kernels.")
 
         # PrefixGrouper path for shared-prefix optimization
@@ -222,7 +214,6 @@ class DataParallelPPOActor(BasePPOActor):
                 and not self.use_fused_kernels
                 and not self.use_dynamic_bsz
                 and not return_all_logps
-                and not use_topk
             )
             if can_use_pg and "response_mask" in micro_batch and "uid" in micro_batch:
                 from verl.trainer.ppo.prefix_grouper_utils import forward_micro_batch_with_prefix_grouper
@@ -370,31 +361,6 @@ class DataParallelPPOActor(BasePPOActor):
                             else torch.utils.checkpoint.checkpoint(self.compute_entropy_from_logits, logits_rmpad)
                         )
 
-                    if use_topk:
-                        if topk_indices is None:
-                            topk = min(distill_topk, logits_rmpad.shape[-1])
-                            topk_logits_rmpad, topk_indices_rmpad = torch.topk(logits_rmpad, topk, dim=-1)
-                        else:
-                            topk = topk_indices.size(-1)
-                            full_topk_indices = torch.zeros(
-                                batch_size,
-                                seqlen,
-                                topk,
-                                device=topk_indices.device,
-                                dtype=topk_indices.dtype,
-                            )
-                            full_topk_indices[:, -response_length - 1 : -1, :] = topk_indices
-                            topk_indices_rmpad = index_first_axis(
-                                rearrange(full_topk_indices, "b s k -> (b s) k"), indices
-                            )
-                            if self.use_ulysses_sp:
-                                topk_indices_rmpad = slice_input_tensor(
-                                    topk_indices_rmpad.unsqueeze(0), dim=1, padding=True
-                                ).squeeze(0)
-                            topk_logits_rmpad = torch.gather(logits_rmpad, dim=-1, index=topk_indices_rmpad)
-                        logsumexp_rmpad = torch.logsumexp(logits_rmpad, dim=-1, keepdim=True)
-                        topk_logps_rmpad = topk_logits_rmpad - logsumexp_rmpad
-
                     # Compute sum_pi_squared if requested (for optimal_token_baseline)
                     if calculate_sum_pi_squared:
                         sum_pi_squared_rmpad = (
@@ -421,20 +387,6 @@ class DataParallelPPOActor(BasePPOActor):
                             unpad_dim=0,
                             padding_size=pad_size,
                         )
-                    if use_topk:
-                        topk_logps_rmpad = gather_outputs_and_unpad(
-                            topk_logps_rmpad,
-                            gather_dim=0,
-                            unpad_dim=0,
-                            padding_size=pad_size,
-                        )
-                        if return_topk_indices:
-                            topk_indices_rmpad = gather_outputs_and_unpad(
-                                topk_indices_rmpad,
-                                gather_dim=0,
-                                unpad_dim=0,
-                                padding_size=pad_size,
-                            )
                     if calculate_sum_pi_squared:
                         sum_pi_squared_rmpad = gather_outputs_and_unpad(
                             sum_pi_squared_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size
@@ -446,10 +398,6 @@ class DataParallelPPOActor(BasePPOActor):
                         entropy_rmpad = entropy_rmpad[:0]
                     if compute_all_logps:
                         all_logps_rmpad = all_logps_rmpad[:0]
-                    if use_topk:
-                        topk_logps_rmpad = topk_logps_rmpad[:0]
-                        if return_topk_indices:
-                            topk_indices_rmpad = topk_indices_rmpad[:0]
 
                 # pad back to (bsz, seqlen)
                 if calculate_entropy:
@@ -473,20 +421,6 @@ class DataParallelPPOActor(BasePPOActor):
                         batch=batch_size,
                         seqlen=seqlen,
                     )
-                if use_topk:
-                    full_topk_logps = pad_input(
-                        hidden_states=topk_logps_rmpad,
-                        indices=indices,
-                        batch=batch_size,
-                        seqlen=seqlen,
-                    )
-                    if return_topk_indices:
-                        full_topk_indices = pad_input(
-                            hidden_states=topk_indices_rmpad,
-                            indices=indices,
-                            batch=batch_size,
-                            seqlen=seqlen,
-                        )
                 full_log_probs = pad_input(
                     hidden_states=log_probs.unsqueeze(-1),
                     indices=indices,
@@ -503,10 +437,6 @@ class DataParallelPPOActor(BasePPOActor):
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
                 if compute_all_logps:
                     all_logps = full_all_logps[:, -response_length - 1 : -1, :]
-                if use_topk:
-                    topk_logps = full_topk_logps[:, -response_length - 1 : -1, :]
-                    if return_topk_indices:
-                        topk_indices = full_topk_indices[:, -response_length - 1 : -1, :]
 
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}
@@ -535,14 +465,6 @@ class DataParallelPPOActor(BasePPOActor):
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
                     if compute_all_logps:
                         all_logps = torch.log_softmax(logits, dim=-1)
-                    if use_topk:
-                        if topk_indices is None:
-                            topk = min(distill_topk, logits.size(-1))
-                            topk_logits, topk_indices = torch.topk(logits, topk, dim=-1)
-                        else:
-                            topk_logits = torch.gather(logits, dim=-1, index=topk_indices)
-                        logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
-                        topk_logps = topk_logits - logsumexp
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
                             entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
@@ -563,10 +485,6 @@ class DataParallelPPOActor(BasePPOActor):
                 outputs["sum_pi_squared"] = sum_pi_squared
             if compute_all_logps:
                 outputs["all_logps"] = all_logps
-            if use_topk:
-                outputs["topk_logps"] = topk_logps
-                if return_topk_indices:
-                    outputs["topk_indices"] = topk_indices
             return outputs
 
     def _optimizer_step(self):
@@ -723,7 +641,7 @@ class DataParallelPPOActor(BasePPOActor):
                     if self.teacher_module is self.actor_module:
                         raise ValueError("Trust-region teacher requires a separate reference teacher_module.")
                     trust_region_teacher = TrustRegionTeacher(
-                        ref_module=self.teacher_module,
+                        teacher_module=self.teacher_module,
                         student_module=self.actor_module,
                         mix_coef=teacher_update_rate,
                     )
@@ -812,23 +730,18 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # all return: (bsz, response_length)
                     return_all_logps = False
-                    distill_topk = None
                     if self_distillation_enabled and self_distillation_cfg.full_logit_distillation:
-                        distill_topk = self_distillation_cfg.distillation_topk
-                        return_all_logps = distill_topk is None
+                        return_all_logps = True
                     outputs = self._forward_micro_batch(
                         self.actor_module,
                         model_inputs,
                         temperature=temperature,
                         calculate_entropy=calculate_entropy,
                         return_all_logps=return_all_logps,
-                        distill_topk=distill_topk,
                     )
                     log_prob = outputs["log_probs"]
                     entropy = outputs["entropys"] if calculate_entropy else None
                     student_all_logps = outputs.get("all_logps") if return_all_logps else None
-                    student_topk_logps = outputs.get("topk_logps") if distill_topk else None
-                    student_topk_indices = outputs.get("topk_indices") if distill_topk else None
 
                     # for fully_async_policy
                     if hasattr(self.config, "use_rollout_log_probs") and self.config.use_rollout_log_probs:
@@ -859,12 +772,9 @@ class DataParallelPPOActor(BasePPOActor):
                                 temperature=temperature,
                                 calculate_entropy=False,
                                 return_all_logps=return_all_logps,
-                                distill_topk=distill_topk,
-                                topk_indices=student_topk_indices,
                             )
                         teacher_log_prob = teacher_outputs["log_probs"]
                         teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
-                        teacher_topk_logps = teacher_outputs.get("topk_logps") if distill_topk else None
                         pg_loss, pg_metrics = compute_self_distillation_loss(
                             student_log_probs=log_prob,
                             teacher_log_probs=teacher_log_prob,
@@ -873,8 +783,6 @@ class DataParallelPPOActor(BasePPOActor):
                             old_log_probs=old_log_prob,
                             student_all_log_probs=student_all_logps,
                             teacher_all_log_probs=teacher_all_logps,
-                            student_topk_log_probs=student_topk_logps,
-                            teacher_topk_log_probs=teacher_topk_logps,
                             self_distillation_mask=self_distillation_mask,
                             loss_agg_mode=loss_agg_mode,
                             rollout_is_weights=rollout_is_weights,
@@ -957,9 +865,9 @@ class DataParallelPPOActor(BasePPOActor):
 
 
 class TrustRegionTeacher(nn.Module):
-    def __init__(self, ref_module: nn.Module, student_module: nn.Module, mix_coef: float):
+    def __init__(self, teacher_module: nn.Module, student_module: nn.Module, mix_coef: float = 0.1):
         super().__init__()
-        self.ref_module = ref_module
+        self.teacher_module = teacher_module
         self.student_module = student_module
         self.mix_coef = float(mix_coef)
         if not 0.0 <= self.mix_coef <= 1.0:
@@ -976,9 +884,9 @@ class TrustRegionTeacher(nn.Module):
         raise ValueError(f"Unsupported model output type for trust-region teacher: {type(output)}")
 
     def forward(self, *args, **kwargs):
-        ref_output = self.ref_module(*args, **kwargs)
+        teacher_output = self.teacher_module(*args, **kwargs)
         student_output = self.student_module(*args, **kwargs)
-        ref_logits = self._extract_logits(ref_output)
+        teacher_logits = self._extract_logits(teacher_output)
         student_logits = self._extract_logits(student_output)
-        logits = torch.lerp(ref_logits, student_logits, self.mix_coef)
-        return SimpleNamespace(logits=logits)
+        blended_logits = torch.lerp(teacher_logits, student_logits, self.mix_coef)
+        return SimpleNamespace(logits=blended_logits)

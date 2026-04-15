@@ -75,7 +75,7 @@ from verl.utils.profiler import (
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.torch_functional import use_original_torch_compile
-from verl.workers.actor.megatron_actor import MegatronPPOActor
+from verl.workers.actor.megatron_actor import MegatronPPOActor, McTrustRegionTeacher
 from verl.workers.config import HFModelConfig, McoreCriticConfig, RolloutConfig
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.rollout import get_rollout_class
@@ -640,6 +640,21 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if self._ref_is_offload_param:
                 offload_megatron_model_to_cpu(self.ref_module)
                 log_gpu_memory_usage("After offload ref params during init", logger=logger)
+
+            if self._is_actor:
+                self_distillation_cfg = self.config.actor.get("self_distillation", None)
+                loss_mode = self.config.actor.policy_loss.get("loss_mode", "vanilla")
+                if self_distillation_cfg is not None and loss_mode == "sdpo":
+                    teacher_regularization = self.actor.resolve_teacher_regularization(self_distillation_cfg)
+                    teacher_update_rate = self.actor.resolve_teacher_update_rate(self_distillation_cfg)
+                    if str(teacher_regularization).lower() in {"trust_region", "trust-region", "trustregion"}:
+                        self.actor.teacher_module = McTrustRegionTeacher(
+                            teacher_module=self.ref_module,
+                            student_module=self.actor_module,
+                            mix_coef=float(teacher_update_rate),
+                        )
+                    else:
+                        self.actor.teacher_module = self.ref_module
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)

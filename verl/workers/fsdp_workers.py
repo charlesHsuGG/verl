@@ -974,7 +974,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     teacher_update_rate = self.actor.resolve_teacher_update_rate(self_distillation_cfg)
                     if str(teacher_regularization).lower() in {"trust_region", "trust-region", "trustregion"}:
                         self.actor.teacher_module = TrustRegionTeacher(
-                            ref_module=self.ref_module_fsdp,
+                            teacher_module=self.ref_module_fsdp,
                             student_module=self.actor_module_fsdp,
                             mix_coef=float(teacher_update_rate),
                         )

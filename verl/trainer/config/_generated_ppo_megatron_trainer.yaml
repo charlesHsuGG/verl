@@ -136,9 +136,7 @@ actor_rollout_ref:
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
     self_distillation:
       _target_: verl.workers.config.SelfDistillationConfig
-      full_logit_distillation: true
-      distillation_topk: 100
-      distillation_add_tail: true
+      full_logit_distillation: false
       alpha: 0.5
       success_reward_threshold: 0.5
       teacher_regularization: ema
