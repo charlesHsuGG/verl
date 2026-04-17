@@ -30,6 +30,7 @@ import torch.distributed
 from megatron.core import parallel_state as mpu
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.transformer.module import MegatronModule
+from megatron.core.models.common.language_module.language_module import LanguageModule
 
 # from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer import DistributedOptimizer
@@ -49,7 +50,7 @@ from verl.utils.megatron.router_replay_utils import (
     reorder_and_merge_vpp_layers,
     set_router_replay_data,
 )
-from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
+from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits, vocab_parallel_log_softmax
 from verl.utils.megatron_utils import get_megatron_mtp_loss, get_model_config, unwrap_model
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
@@ -87,8 +88,8 @@ class McTrustRegionTeacher(MegatronModule):
         >>> from torch import nn
         >>> 
         >>> # In Megatron setup with pipeline parallelism
-        >>> teacher_module = nn.ModuleList([stage1, stage2, stage3])
-        >>> student_module = nn.ModuleList([stage1_student, stage2_student, stage3_student])
+        >>> teacher_module = LanguageModule()
+        >>> student_module = LanguageModule()
         >>> teacher = McTrustRegionTeacher(
         ...     teacher_module=teacher_module,
         ...     student_module=student_module,
@@ -96,7 +97,12 @@ class McTrustRegionTeacher(MegatronModule):
         ... )
     """
 
-    def __init__(self, ref_module: nn.ModuleList, student_module: nn.ModuleList, mix_coef: float = 0.1):
+    def __init__(self, ref_module: MegatronModule, student_module: MegatronModule, mix_coef: float = 0.1):
+        if isinstance(teacher_module, LanguageModule):
+            self.vocab_size = teacher_module.vocab_size
+        else:
+            assert hasattr(teacher_module, "language_model"), "Module has contain language model, please check your model architecture."
+            self.vocab_size = teacher_module.language_model.vocab_size
         self.teacher_module = teacher_module
         self.student_module = student_module
         self.mix_coef = float(mix_coef)
@@ -376,6 +382,140 @@ class MegatronPPOActor(BasePPOActor):
         """Update teacher state after optimizer step based on configured regularization mode."""
         self._update_teacher_ema()
 
+    def _compute_log_prob(self, module: nn.ModuleList, data: DataProto, calculate_entropy=False, compute_full_log_probs: bool = False) -> torch.Tensor:
+        prev_modes = [m.training for m in module]
+        for m in module:
+            m.eval()
+
+        use_dynamic_bsz = data.meta_info.get("use_dynamic_bsz", False)
+        micro_batch_size = data.meta_info.get("micro_batch_size", None)
+        max_token_len = data.meta_info.get("max_token_len", None)
+        if use_dynamic_bsz:
+            assert max_token_len is not None, "max_token_len must be set when use_dynamic_bsz is True"
+            max_token_len = max_token_len * self.config.megatron.context_parallel_size
+        else:
+            assert micro_batch_size is not None, "micro batch size is needed for forward compute when use_dynamic_bsz is False"
+
+        def compute_logprobs_fn(output, data, use_dynamic_bsz=False, indices=None):
+            metrics = {}
+            response = data["responses"]
+            response_length = response.size(1)
+            metrics["log_probs"] = output["log_probs"][:, -response_length - 1 : -1].contiguous()
+            if "full_log_probs" in output:
+                response = data["responses"]
+                response_length = response.size(1)
+                metrics["full_log_probs"] = output["full_log_probs"][:, -response_length - 1 : -1, :].contiguous()
+            return metrics
+
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+
+        if self.enable_routing_replay and self.config.router_replay.mode == "R3":
+            assert "routed_experts" in data.batch.keys(), "routed_experts must be in data.batch.keys()"
+            select_keys.append("routed_experts")
+
+        batch = data.select(batch_keys=select_keys).batch
+        input_ids = batch["input_ids"]
+        batch_size = input_ids.size(0)
+        response = batch["responses"]
+        response_length = response.size(1)
+        with torch.no_grad():
+            output = self.forward_backward_batch(
+                self.actor_module, data,
+                forward_only=True,
+                post_process_fn=compute_logprobs_fn,
+                calculate_entropy=calculate_entropy,
+                use_dynamic_bsz=use_dynamic_bsz,
+                micro_batch_size=micro_batch_size,
+                max_token_len=max_token_len,
+                compute_full_log_probs=compute_full_log_probs
+            )
+            if mpu.is_pipeline_last_stage(ignore_virtual=True):
+                # only on last rank. It should be on every tp rank
+                if calculate_entropy:
+                    log_probs = [o[0]["log_probs"] for o in output["output"]]  # (bs, seq_size)
+                    full_log_probs = [o[0]["full_log_probs"] for o in output["output"]] if compute_full_log_probs else None  # (bs, seq_size, vocab_size)
+                else:
+                    log_probs = [o["log_probs"] for o in output["output"]]  # (bs, seq_size)
+                    full_log_probs = [o["full_log_probs"] for o in output["output"]] if compute_full_log_probs else None  # (bs, seq_size, vocab_size)
+                log_probs = torch.cat(log_probs, dim=0).to(torch.float32)
+                if full_log_probs is not None:
+                    full_log_probs = torch.cat(full_log_probs, dim=0).to(torch.float32)
+                if use_dynamic_bsz:
+                    indices = output["indices"]
+                    indices = list(itertools.chain.from_iterable(indices))
+                    assert len(indices) == log_probs.size(0), f"{len(indices)} vs. {log_probs.size()}"
+                    revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
+                    log_probs = log_probs[revert_indices]
+                    if full_log_probs is not None:
+                        full_log_probs = full_log_probs[revert_indices]
+            else:
+                log_probs = torch.empty(size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device)
+                full_log_probs = torch.empty(
+                    size=(batch_size, response_length, module.vocab_size), dtype=torch.float32, device=input_ids.device
+                ) if compute_full_log_probs else None
+            log_probs = log_probs.to(get_device_id())
+            # broadcast across pp ranks
+            torch.distributed.broadcast(
+                tensor=log_probs, src=mpu.get_pipeline_model_parallel_last_rank(), group=mpu.get_pipeline_model_parallel_group(),
+                async_op=False,
+            )
+            log_probs = log_probs.to("cpu")
+            if full_log_probs is not None:
+                full_log_probs = full_log_probs.to(get_device_id())
+                torch.distributed.broadcast(
+                    tensor=full_log_probs, src=mpu.get_pipeline_model_parallel_last_rank(), group=mpu.get_pipeline_model_parallel_group(),
+                    async_op=False,
+                )
+                full_log_probs = full_log_probs.to("cpu")
+
+            if calculate_entropy:
+                # Note that o[0] is metrics, o[1] is entropy
+                if mpu.is_pipeline_last_stage(ignore_virtual=True):
+                    entropys = torch.cat([o[1] for o in output["output"]], dim=0)
+                    entropys = entropys.to(torch.float32)
+                    if use_dynamic_bsz:
+                        indices = output["indices"]
+                        indices = list(itertools.chain.from_iterable(indices))
+                        assert len(indices) == entropys.size(0), f"{len(indices)} vs. {entropys.size()}"
+                        revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
+                        entropys = entropys[revert_indices]
+                else:
+                    entropys = torch.empty(size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device)
+                # broadcast across pp ranks
+                entropys = entropys.to(get_device_id())
+                torch.distributed.broadcast(
+                    tensor=entropys,
+                    src=mpu.get_pipeline_model_parallel_last_rank(),
+                    group=mpu.get_pipeline_model_parallel_group(),
+                    async_op=False,
+                )
+                entropys = entropys.to("cpu")
+
+            layers_topk_idx = None
+            if RouterReplayHelper.is_r2_record_action(self.tf_config):
+                # (bs, max_seq_len/response_len,local_layer_num,topk)
+                layers_topk_idx = output["mini_layer_topk_idx_tensor"].to(torch.uint8)
+                if use_dynamic_bsz:
+                    indices = output["indices"]
+                    indices = list(itertools.chain.from_iterable(indices))
+                    assert len(indices) == layers_topk_idx.size(0), f"{len(indices)} vs. {layers_topk_idx.size()}"
+                    revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
+                    layers_topk_idx = layers_topk_idx[revert_indices]
+                layers_topk_idx = pp_gather(layers_topk_idx, self.tf_config)
+        else:
+            if "rollout_log_probs" in data.batch:
+                log_probs = data.batch['rollout_log_probs']
+            elif "old_log_probs" in data.batch:
+                log_probs = data.batch['old_log_probs']
+            else:
+                raise ValueError("Not found `rollout_log_probs` or `old_log_probs` field in data. Please recheck data field or set recompute_old_log_prob=True.")
+        # add empty cache after each compute
+        get_torch_device().empty_cache()
+
+        for module, mode in zip(module, prev_modes, strict=False):
+            module.train(mode)
+        return log_probs, full_log_probs, entropys, layers_topk_idx
+
     @GPUMemoryLogger(role="megatron actor", logger=logger)
     def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
@@ -395,25 +535,7 @@ class MegatronPPOActor(BasePPOActor):
         Returns:
             DataProto: torch.Tensor: the log_prob tensor
         """
-        prev_modes = [m.training for m in self.actor_module]
-        for module in self.actor_module:
-            module.eval()
-        use_dynamic_bsz = data.meta_info.get("use_dynamic_bsz", False)
-        micro_batch_size = data.meta_info.get("micro_batch_size", None)
-        max_token_len = data.meta_info.get("max_token_len", None)
-        if use_dynamic_bsz:
-            assert max_token_len is not None, "max_token_len must be set when use_dynamic_bsz is True"
-            max_token_len = max_token_len * self.config.megatron.context_parallel_size
-        else:
-            assert micro_batch_size is not None, (
-                "micro batch size is needed for forward compute when use_dynamic_bsz is False"
-            )
-
-        def compute_logprobs_fn(output, data, use_dynamic_bsz=False, indices=None):
-            response = data["responses"]
-            response_length = response.size(1)
-            log_probs = output["log_probs"][:, -response_length - 1 : -1].contiguous()
-            return {"log_probs": log_probs}
+        
 
         # We make recompute_old_log_prob by default here.
         # TODO (zhangchi.usc1992): actually, this function should only return log_prob and this logic should be
@@ -422,89 +544,7 @@ class MegatronPPOActor(BasePPOActor):
 
         entropys = torch.Tensor()
         if recompute_old_log_prob:
-            select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
-
-            if self.enable_routing_replay and self.config.router_replay.mode == "R3":
-                assert "routed_experts" in data.batch.keys(), "routed_experts must be in data.batch.keys()"
-                select_keys.append("routed_experts")
-
-            batch = data.select(batch_keys=select_keys).batch
-            input_ids = batch["input_ids"]
-            batch_size = input_ids.size(0)
-            response = batch["responses"]
-            response_length = response.size(1)
-            with torch.no_grad():
-                output = self.forward_backward_batch(
-                    self.actor_module, data,
-                    forward_only=True,
-                    post_process_fn=compute_logprobs_fn,
-                    calculate_entropy=calculate_entropy,
-                    use_dynamic_bsz=use_dynamic_bsz,
-                    micro_batch_size=micro_batch_size,
-                    max_token_len=max_token_len,
-                )
-                if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                    # only on last rank. It should be on every tp rank
-                    if calculate_entropy:
-                        log_probs = [o[0]["log_probs"] for o in output["output"]]  # (bs, seq_size)
-                    else:
-                        log_probs = [o["log_probs"] for o in output["output"]]  # (bs, seq_size)
-                    log_probs = torch.cat(log_probs, dim=0).to(torch.float32)
-                    if use_dynamic_bsz:
-                        indices = output["indices"]
-                        indices = list(itertools.chain.from_iterable(indices))
-                        assert len(indices) == log_probs.size(0), f"{len(indices)} vs. {log_probs.size()}"
-                        revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
-                        log_probs = log_probs[revert_indices]
-                else:
-                    log_probs = torch.empty(
-                        size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device
-                    )
-                log_probs = log_probs.to(get_device_id())
-                # broadcast across pp ranks
-                torch.distributed.broadcast(
-                    tensor=log_probs,
-                    src=mpu.get_pipeline_model_parallel_last_rank(),
-                    group=mpu.get_pipeline_model_parallel_group(),
-                    async_op=False,
-                )
-                log_probs = log_probs.to("cpu")
-                if calculate_entropy:
-                    # Note that o[0] is metrics, o[1] is entropy
-                    if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                        entropys = torch.cat([o[1] for o in output["output"]], dim=0)
-                        entropys = entropys.to(torch.float32)
-                        if use_dynamic_bsz:
-                            indices = output["indices"]
-                            indices = list(itertools.chain.from_iterable(indices))
-                            assert len(indices) == entropys.size(0), f"{len(indices)} vs. {entropys.size()}"
-                            revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
-                            entropys = entropys[revert_indices]
-                    else:
-                        entropys = torch.empty(
-                            size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device
-                        )
-                    # broadcast across pp ranks
-                    entropys = entropys.to(get_device_id())
-                    torch.distributed.broadcast(
-                        tensor=entropys,
-                        src=mpu.get_pipeline_model_parallel_last_rank(),
-                        group=mpu.get_pipeline_model_parallel_group(),
-                        async_op=False,
-                    )
-                    entropys = entropys.to("cpu")
-                layers_topk_idx = None
-
-                if RouterReplayHelper.is_r2_record_action(self.tf_config):
-                    # (bs, max_seq_len/response_len,local_layer_num,topk)
-                    layers_topk_idx = output["mini_layer_topk_idx_tensor"].to(torch.uint8)
-                    if use_dynamic_bsz:
-                        indices = output["indices"]
-                        indices = list(itertools.chain.from_iterable(indices))
-                        assert len(indices) == layers_topk_idx.size(0), f"{len(indices)} vs. {layers_topk_idx.size()}"
-                        revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
-                        layers_topk_idx = layers_topk_idx[revert_indices]
-                    layers_topk_idx = pp_gather(layers_topk_idx, self.tf_config)
+            log_probs, _, entropys, layers_topk_idx = self._compute_log_prob(self.actor_module, data, calculate_entropy=calculate_entropy)
         else:
             if "rollout_log_probs" in data.batch:
                 log_probs = data.batch['rollout_log_probs']
@@ -512,11 +552,7 @@ class MegatronPPOActor(BasePPOActor):
                 log_probs = data.batch['old_log_probs']
             else:
                 raise ValueError("Not found `rollout_log_probs` or `old_log_probs` field in data. Please recheck data field or set recompute_old_log_prob=True.")
-        # add empty cache after each compute
-        get_torch_device().empty_cache()
 
-        for module, mode in zip(self.actor_module, prev_modes, strict=False):
-            module.train(mode)
         return log_probs, entropys, layers_topk_idx
 
     def make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
@@ -600,7 +636,7 @@ class MegatronPPOActor(BasePPOActor):
         micro_batch_size=None,
         max_token_len=None,
         mini_batch_size=None,
-        return_all_logps: bool = False,
+        compute_full_log_probs: bool = False,
     ):
         """
         We assume:
@@ -608,7 +644,7 @@ class MegatronPPOActor(BasePPOActor):
         - The communication shape is (total_nnz_pad_to_sp // tp_size, 1, hidden_size) if sequence parallel is enabled
         """
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-        if return_all_logps and self.use_fused_kernels:
+        if compute_full_log_probs and self.use_fused_kernels:
             raise ValueError("Logit distillation requires disabling fused kernels.")
 
         # broadcast from last pp rank to all other pp ranks
@@ -715,26 +751,23 @@ class MegatronPPOActor(BasePPOActor):
                 # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                 rollout_is_weights = data.get("rollout_is_weights", None)
 
-                if loss_mode == "sdpo":
-                    self_distillation_cfg = getattr(self.config, "self_distillation", None)
-                    if self_distillation_cfg is None:
-                        raise ValueError("SDPO is enabled but self_distillation config is missing.")
-                    
+                if loss_mode == "sdpo":            
                     assert "teacher_log_probs" in data, "SDPO must have `teacher_log_probs` in field."
-                    teacher_log_probs = data["teacher_log_probs"]
-                    teacher_all_logps, student_all_logps = data.get("teacher_all_logps", None), data.get("all_logps", None)
+                    student_full_log_probs = data.get("full_log_probs", None)
+                    teacher_log_probs, teacher_full_log_probs = data["teacher_log_probs"], data.get("teacher_full_log_probs", None)
                     self_distillation_mask = data.get("self_distillation_mask", None)
                     
                     pg_loss, pg_metrics = compute_self_distillation_loss(
-                        student_log_probs=log_prob,
-                        teacher_log_probs=teacher_log_probs,
-                        response_mask=response_mask,
-                        self_distillation_config=self_distillation_cfg,
                         old_log_probs=old_log_prob,
-                        student_all_log_probs=student_all_logps,
-                        teacher_all_log_probs=teacher_all_logps,
+                        log_probs=log_prob,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        teacher_log_probs=teacher_log_prob,
+                        student_full_log_probs=student_full_log_probs,
+                        teacher_full_log_probs=teacher_full_log_probs,
                         self_distillation_mask=self_distillation_mask,
                         loss_agg_mode=loss_agg_mode,
+                        config=self.config,
                         rollout_is_weights=rollout_is_weights,
                     )
                     stats.update(pg_metrics)
@@ -895,8 +928,8 @@ class MegatronPPOActor(BasePPOActor):
                     log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
                     log_probs = log_probs.masked_fill(~label_mask, 0.0)
                     ret["log_probs"] = log_probs
-                    if compute_all_logps:
-                        ret["all_logps"] = torch.log_softmax(logits_bak, dim=-1)
+                    if compute_full_log_probs:
+                        ret["full_log_probs"] = vocab_parallel_log_softmax(logits_bak)
                     return ret
 
                 logits_processor_args = {"label": label, "label_mask": label_mask}
@@ -1031,6 +1064,7 @@ class MegatronPPOActor(BasePPOActor):
                     )
 
         metrics = {}
+        did_update = False
         for data in dataloader:
             if self.config.router_replay.mode in ["R2", "R3"]:
                 RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
@@ -1051,77 +1085,30 @@ class MegatronPPOActor(BasePPOActor):
 
             if self_distillation_enabled:
 
-                select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+                select_keys = ["responses", "teacher_input_ids", "teacher_attention_mask", "teacher_position_ids"]
             
                 if self.enable_routing_replay and self.config.router_replay.mode == "R3":
                     assert "routed_experts" in data.batch.keys(), "routed_experts must be in data.batch.keys()"
                     select_keys.append("routed_experts")
 
-                return_all_logps = False
-                if self_distillation_enabled and self_distillation_cfg.full_logit_distillation:
-                    return_all_logps = True
+                compute_full_log_probs = self_distillation_cfg.full_logit_distillation
 
-                def compute_logprobs_fn(output, data, use_dynamic_bsz=False, indices=None):
-                    if return_all_logps:
-                        return {"log_probs": output["log_probs"], "all_logps": output["all_logps"]}
-                    return {"log_probs": output["log_probs"]}
-                    
                 batch = data.select(batch_keys=select_keys).batch
-                input_ids = batch["input_ids"]
-                batch_size = input_ids.size(0)
-                response = batch["responses"]
-                response_length = response.size(1)
-                with torch.no_grad():
-                    teacher_output = self.forward_backward_batch(
-                        trust_region_teacher or self.teacher_module, data,
-                        forward_only=True,
-                        calculate_entropy=False,
-                        post_process_fn=compute_logprobs_fn,
-                        use_dynamic_bsz=self.config.use_dynamic_bsz,
-                        micro_batch_size=micro_batch_size,
-                        max_token_len=max_token_len,
-                        return_all_logps=return_all_logps
-                    )
-                    if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                        teacher_log_probs = [o["log_probs"] for o in teacher_output["output"]]
-                        if return_all_logps:
-                            teacher_all_logps = [o["all_logps"] for o in teacher_output["output"]]
-                        if use_dynamic_bsz:
-                            teacher_indices = teacher_output["indices"]
-                            teacher_indices = list(itertools.chain.from_iterable(teacher_indices))
-                            assert len(teacher_indices) == teacher_log_probs.size(0), f"{len(teacher_indices)} vs. {teacher_log_probs.size()}"
-                            revert_teacher_indices = torch.tensor(get_reverse_idx(teacher_indices), dtype=torch.long)
-                            teacher_log_probs = teacher_log_probs[revert_teacher_indices]
-                            if return_all_logps:
-                                teacher_all_logps = teacher_all_logps[revert_teacher_indices]
-                    else:
-                        teacher_log_probs = torch.empty(
-                            size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device
-                        )
-                        if return_all_logps:
-                            teacher_all_logps = torch.empty(
-                                size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device
-                            )
-                    teacher_log_probs = teacher_log_probs.to(get_device_id())
-                    # broadcast across pp ranks
-                    torch.distributed.broadcast(
-                        tensor=teacher_log_probs,
-                        src=mpu.get_pipeline_model_parallel_last_rank(),
-                        group=mpu.get_pipeline_model_parallel_group(),
-                        async_op=False,
-                    )
-                    teacher_log_probs = teacher_log_probs.to("cpu")
-                    data.batch["teacher_log_probs"] = teacher_log_probs
-                    if return_all_logps:
-                        teacher_all_logps = teacher_all_logps.to(get_device_id())
-                        torch.distributed.broadcast(
-                            tensor=teacher_all_logps,
-                            src=mpu.get_pipeline_model_parallel_last_rank(),
-                            group=mpu.get_pipeline_model_parallel_group(),
-                            async_op=False,
-                        )
-                        teacher_all_logps = teacher_all_logps.to("cpu")
-                        data.batch["teacher_all_logps"] = teacher_all_logps
+                teacher_data = DataProto.from_dict(
+                    tensors={
+                        "responses": batch["responses"], "input_ids": batch["teacher_input_ids"],
+                        "attention_mask": batch["teacher_attention_mask"], "position_ids": batch["teacher_position_ids"]
+                    }, non_tensors=data.non_tensor_batch, meta_info=data.meta_info
+                )
+                teacher_model = trust_region_teacher or self.teacher_module or self.actor_module
+                teacher_log_probs, teacher_full_log_probs, _, _ = self._compute_log_prob(
+                    teacher_model, teacher_data, calculate_entropy=False, compute_full_log_probs=compute_full_log_probs
+                )
+                if teacher_full_log_probs is not None:
+                    teacher_outputs = DataProto.from_dict(tensors={"teacher_log_probs": teacher_log_probs, "teacher_full_log_probs": teacher_full_log_probs})
+                else:
+                    teacher_outputs = DataProto.from_dict(tensors={"teacher_log_probs": teacher_log_probs})
+                data = data.union(teacher_outputs)
 
                 metric_micro_batch = self.forward_backward_batch(
                     self.actor_module, data,
@@ -1130,7 +1117,7 @@ class MegatronPPOActor(BasePPOActor):
                     micro_batch_size=micro_batch_size,
                     max_token_len=max_token_len,
                     mini_batch_size=self.config.ppo_mini_batch_size,
-                    return_all_logps=return_all_logps
+                    compute_full_log_probs=compute_full_log_probs
                 )
             else:
                 metric_micro_batch = self.forward_backward_batch(
@@ -1154,6 +1141,8 @@ class MegatronPPOActor(BasePPOActor):
                 append_to_dict(metrics, metric[0])  # append the metric from this micro-batch to global metrics.
 
             update_successful, grad_norm, num_zeros_in_grad = self.actor_optimizer.step()
+            if torch.isfinite(grad_norm).item():
+                did_update = True
             data = {"actor/grad_norm": grad_norm}
             append_to_dict(metrics, data)
 
@@ -1168,5 +1157,7 @@ class MegatronPPOActor(BasePPOActor):
                 RouterReplay.clear_global_indices()
 
         self.actor_optimizer.zero_grad()
+        if did_update:
+            self._update_teacher()
         get_torch_device().empty_cache()
         return metrics

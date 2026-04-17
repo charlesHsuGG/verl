@@ -48,6 +48,34 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+class TrustRegionTeacher(nn.Module):
+    def __init__(self, teacher_module: nn.Module, student_module: nn.Module, mix_coef: float = 0.1):
+        super().__init__()
+        self.teacher_module = teacher_module
+        self.student_module = student_module
+        self.mix_coef = float(mix_coef)
+        if not 0.0 <= self.mix_coef <= 1.0:
+            raise ValueError(f"mix_coef must be in [0,1], got {self.mix_coef}")
+
+    @staticmethod
+    def _extract_logits(output) -> torch.Tensor:
+        if hasattr(output, "logits"):
+            return output.logits
+        if isinstance(output, tuple):
+            return output[0]
+        if isinstance(output, dict):
+            return output["logits"]
+        raise ValueError(f"Unsupported model output type for trust-region teacher: {type(output)}")
+
+    def forward(self, *args, **kwargs):
+        teacher_output = self.teacher_module(*args, **kwargs)
+        student_output = self.student_module(*args, **kwargs)
+        teacher_logits = self._extract_logits(teacher_output)
+        student_logits = self._extract_logits(student_output)
+        blended_logits = torch.lerp(teacher_logits, student_logits, self.mix_coef)
+        return SimpleNamespace(logits=blended_logits)
+
+
 class DataParallelPPOActor(BasePPOActor):
     """FSDP DataParallel PPO Actor or Ref worker
 
@@ -190,7 +218,7 @@ class DataParallelPPOActor(BasePPOActor):
         micro_batch: dict[str, torch.Tensor],
         temperature: float,
         calculate_entropy: bool = False,
-        return_all_logps: bool = False,
+        compute_full_log_probs: bool = False,
     ) -> dict[str, torch.Tensor]:
         """
         Returns:
@@ -203,7 +231,7 @@ class DataParallelPPOActor(BasePPOActor):
         """
         calculate_sum_pi_squared = self.config.get("calculate_sum_pi_squared", False)
         sum_pi_squared_checkpointing = self.config.get("sum_pi_squared_checkpointing", False)
-        if return_all_logps and self.use_fused_kernels:
+        if compute_full_log_probs and self.use_fused_kernels:
             raise ValueError("Logit distillation requires disabling fused kernels.")
 
         # PrefixGrouper path for shared-prefix optimization
@@ -213,7 +241,7 @@ class DataParallelPPOActor(BasePPOActor):
                 and not self.use_ulysses_sp
                 and not self.use_fused_kernels
                 and not self.use_dynamic_bsz
-                and not return_all_logps
+                and not compute_full_log_probs
             )
             if can_use_pg and "response_mask" in micro_batch and "uid" in micro_batch:
                 from verl.trainer.ppo.prefix_grouper_utils import forward_micro_batch_with_prefix_grouper
@@ -340,7 +368,7 @@ class DataParallelPPOActor(BasePPOActor):
                 else:
                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                     logits_rmpad.div_(temperature)
-                    all_logps_rmpad = torch.log_softmax(logits_rmpad, dim=-1) if compute_all_logps else None
+                    full_log_probs_rmpad = torch.log_softmax(logits_rmpad, dim=-1) if compute_full_log_probs else None
 
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                     inplace_backward = True
@@ -396,8 +424,8 @@ class DataParallelPPOActor(BasePPOActor):
                     log_probs = log_probs[:0]
                     if calculate_entropy:
                         entropy_rmpad = entropy_rmpad[:0]
-                    if compute_all_logps:
-                        all_logps_rmpad = all_logps_rmpad[:0]
+                    if full_log_probs_rmpad is not None:
+                        full_log_probs_rmpad = full_log_probs_rmpad[:0]
 
                 # pad back to (bsz, seqlen)
                 if calculate_entropy:
@@ -414,14 +442,13 @@ class DataParallelPPOActor(BasePPOActor):
                         batch=batch_size,
                         seqlen=seqlen,
                     )
-                if compute_all_logps:
-                    full_all_logps = pad_input(
-                        hidden_states=all_logps_rmpad,
-                        indices=indices,
-                        batch=batch_size,
-                        seqlen=seqlen,
-                    )
                 full_log_probs = pad_input(
+                    hidden_states=full_log_probs_rmpad,
+                    indices=indices,
+                    batch=batch_size,
+                    seqlen=seqlen,
+                ) if full_log_probs_rmpad is not None else None
+                log_probs = pad_input(
                     hidden_states=log_probs.unsqueeze(-1),
                     indices=indices,
                     batch=batch_size,
@@ -434,9 +461,9 @@ class DataParallelPPOActor(BasePPOActor):
                 if calculate_sum_pi_squared:
                     # (bsz, response_length)
                     sum_pi_squared = full_sum_pi_squared.squeeze(-1)[:, -response_length - 1 : -1]
-                log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
-                if compute_all_logps:
-                    all_logps = full_all_logps[:, -response_length - 1 : -1, :]
+                log_probs = log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+                if full_log_probs is not None:
+                    full_log_probs = full_log_probs[:, -response_length - 1 : -1, :]
 
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}
@@ -463,8 +490,7 @@ class DataParallelPPOActor(BasePPOActor):
                     logits.div_(temperature)
                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
-                    if compute_all_logps:
-                        all_logps = torch.log_softmax(logits, dim=-1)
+                    full_log_probs = torch.log_softmax(logits, dim=-1) if compute_full_log_probs else None else None
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
                             entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
@@ -483,8 +509,8 @@ class DataParallelPPOActor(BasePPOActor):
                 outputs["entropys"] = entropy
             if calculate_sum_pi_squared:
                 outputs["sum_pi_squared"] = sum_pi_squared
-            if compute_all_logps:
-                outputs["all_logps"] = all_logps
+            if compute_full_log_probs:
+                outputs["full_log_probs"] = full_log_probs
             return outputs
 
     def _optimizer_step(self):
@@ -729,19 +755,18 @@ class DataParallelPPOActor(BasePPOActor):
                         loss_scale_factor = 1 / self.gradient_accumulation
 
                     # all return: (bsz, response_length)
-                    return_all_logps = False
+                    compute_full_log_probs = False
                     if self_distillation_enabled and self_distillation_cfg.full_logit_distillation:
-                        return_all_logps = True
+                        compute_full_log_probs = True
                     outputs = self._forward_micro_batch(
                         self.actor_module,
                         model_inputs,
                         temperature=temperature,
                         calculate_entropy=calculate_entropy,
-                        return_all_logps=return_all_logps,
+                        compute_full_log_probs=compute_full_log_probs,
                     )
                     log_prob = outputs["log_probs"]
                     entropy = outputs["entropys"] if calculate_entropy else None
-                    student_all_logps = outputs.get("all_logps") if return_all_logps else None
 
                     # for fully_async_policy
                     if hasattr(self.config, "use_rollout_log_probs") and self.config.use_rollout_log_probs:
@@ -771,24 +796,24 @@ class DataParallelPPOActor(BasePPOActor):
                                 teacher_model, teacher_inputs,
                                 temperature=temperature,
                                 calculate_entropy=False,
-                                return_all_logps=return_all_logps,
+                                compute_full_log_probs=compute_full_log_probs,
                             )
-                        teacher_log_prob = teacher_outputs["log_probs"]
-                        teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
+                        student_full_log_probs = data.get("full_log_probs", None)
+                        teacher_log_prob, teacher_full_log_probs = teacher_outputs["log_probs"], teacher_outputs.get("full_log_probs", None)
                         pg_loss, pg_metrics = compute_self_distillation_loss(
-                            student_log_probs=log_prob,
-                            teacher_log_probs=teacher_log_prob,
-                            response_mask=response_mask,
-                            self_distillation_config=self_distillation_cfg,
                             old_log_probs=old_log_prob,
-                            student_all_log_probs=student_all_logps,
-                            teacher_all_log_probs=teacher_all_logps,
+                            log_probs=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            teacher_log_probs=teacher_log_prob,
+                            student_full_log_probs=student_full_log_probs,
+                            teacher_full_log_probs=teacher_full_log_probs,
                             self_distillation_mask=self_distillation_mask,
                             loss_agg_mode=loss_agg_mode,
+                            config=self.config,
                             rollout_is_weights=rollout_is_weights,
                         )
 
-                        pg_metrics["self_distillation/empty_target_batch"] = self_distillation_mask.sum().item() == 0
                         micro_batch_metrics.update(pg_metrics)
                     else:
                         # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
@@ -862,31 +887,3 @@ class DataParallelPPOActor(BasePPOActor):
         if did_update:
             self._update_teacher()
         return metrics
-
-
-class TrustRegionTeacher(nn.Module):
-    def __init__(self, teacher_module: nn.Module, student_module: nn.Module, mix_coef: float = 0.1):
-        super().__init__()
-        self.teacher_module = teacher_module
-        self.student_module = student_module
-        self.mix_coef = float(mix_coef)
-        if not 0.0 <= self.mix_coef <= 1.0:
-            raise ValueError(f"mix_coef must be in [0,1], got {self.mix_coef}")
-
-    @staticmethod
-    def _extract_logits(output) -> torch.Tensor:
-        if hasattr(output, "logits"):
-            return output.logits
-        if isinstance(output, tuple):
-            return output[0]
-        if isinstance(output, dict):
-            return output["logits"]
-        raise ValueError(f"Unsupported model output type for trust-region teacher: {type(output)}")
-
-    def forward(self, *args, **kwargs):
-        teacher_output = self.teacher_module(*args, **kwargs)
-        student_output = self.student_module(*args, **kwargs)
-        teacher_logits = self._extract_logits(teacher_output)
-        student_logits = self._extract_logits(student_output)
-        blended_logits = torch.lerp(teacher_logits, student_logits, self.mix_coef)
-        return SimpleNamespace(logits=blended_logits)

@@ -1198,125 +1198,6 @@ def agg_loss(
     return loss
 
 
-def compute_self_distillation_loss(
-    student_log_probs: torch.Tensor,
-    teacher_log_probs: torch.Tensor,
-    response_mask: torch.Tensor,
-    self_distillation_config: Any,
-    old_log_probs: Optional[torch.Tensor] = None,
-    student_all_log_probs: Optional[torch.Tensor] = None,
-    teacher_all_log_probs: Optional[torch.Tensor] = None,
-    self_distillation_mask: Optional[torch.Tensor] = None,
-    loss_agg_mode: str = "token-mean",
-    rollout_is_weights: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Compute the SDPO distillation loss for actor updates.
-
-    Args:
-        student_log_probs: Student token log-probabilities, shape (batch_size, response_length).
-        teacher_log_probs: Teacher token log-probabilities, shape (batch_size, response_length).
-        response_mask: Response token mask, shape (batch_size, response_length).
-        self_distillation_config: SDPO self-distillation config object.
-        old_log_probs: Optional old policy log-probabilities for IS clipping.
-        student_all_log_probs: Optional student full-vocab log-probabilities for full-logit distillation.
-        teacher_all_log_probs: Optional teacher full-vocab log-probabilities for full-logit distillation.
-        self_distillation_mask: Optional per-sample SDPO mask; masked samples are excluded from distillation.
-        loss_agg_mode: Loss aggregation mode.
-        rollout_is_weights: Optional rollout correction IS weights.
-
-    Returns:
-        tuple[torch.Tensor, dict[str, Any]]:
-            - Distillation loss scalar.
-            - Metrics dictionary for debugging and monitoring.
-    """
-
-    metrics = {}
-
-    loss_mask = response_mask
-    if self_distillation_mask is not None:
-        loss_mask = loss_mask * self_distillation_mask.unsqueeze(1)
-
-    distill_variant = "rkl_token"
-    if self_distillation_config.full_logit_distillation:
-        distill_variant = "full_logit_all"
-        if student_all_log_probs is None or teacher_all_log_probs is None:
-            raise ValueError("full_logit_distillation requires student_all_log_probs and teacher_all_log_probs.")
-        student_distill_log_probs = student_all_log_probs
-        teacher_distill_log_probs = teacher_all_log_probs
-
-        kl_type_code = 0.0
-        if self_distillation_config.alpha == 0.0:
-            kl_loss = F.kl_div(student_distill_log_probs, teacher_distill_log_probs, reduction="none", log_target=True)
-        elif self_distillation_config.alpha == 1.0:
-            kl_type_code = 1.0
-            kl_loss = F.kl_div(teacher_distill_log_probs, student_distill_log_probs, reduction="none", log_target=True)
-        else:
-            kl_type_code = 2.0
-            # Compute the log of the mixture distribution
-            # log(a + b) = log(exp(log(a)) + exp(log(b))) -> for mixture
-            alpha = torch.tensor(
-                self_distillation_config.alpha,
-                dtype=student_distill_log_probs.dtype,
-                device=student_distill_log_probs.device,
-            )
-            mixture_log_probs = torch.logsumexp(
-                torch.stack(
-                    [
-                        student_distill_log_probs + torch.log(1 - alpha),
-                        teacher_distill_log_probs + torch.log(alpha),
-                    ]
-                ),
-                dim=0,
-            )
-            kl_teacher = F.kl_div(mixture_log_probs, teacher_distill_log_probs, reduction="none", log_target=True)
-            kl_student = F.kl_div(mixture_log_probs, student_distill_log_probs, reduction="none", log_target=True)
-            # Compute the generalized Jensen-Shannon divergence.
-            kl_loss = torch.lerp(kl_student, kl_teacher, alpha)
-
-        per_token_loss = kl_loss.sum(-1)
-    else:
-        assert self_distillation_config.alpha == 1.0, "Only reverse KL is supported for non-full-logit distillation"
-        log_ratio = student_log_probs - teacher_log_probs
-        per_token_loss = log_ratio.detach() * student_log_probs
-
-    is_clip = self_distillation_config.is_clip
-    if is_clip is not None:
-        if old_log_probs is None:
-            raise ValueError("old_log_probs is required for distillation IS ratio.")
-
-        negative_approx_kl = (student_log_probs - old_log_probs).detach()
-        negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
-        ratio = torch.exp(negative_approx_kl).clamp(max=is_clip)
-        per_token_loss = per_token_loss * ratio
-
-    # Apply rollout correction weights if provided
-    if rollout_is_weights is not None:
-        per_token_loss = per_token_loss * rollout_is_weights
-
-    loss = agg_loss(
-        loss_mat=per_token_loss,
-        loss_mask=loss_mask,
-        loss_agg_mode=loss_agg_mode,
-        batch_num_tokens=loss_mask.sum().clamp(min=1.0),
-    )
-    metrics.update(
-        {
-            "self_distillation/loss": loss.detach().item(),
-            "self_distillation/alpha": float(self_distillation_config.alpha),
-            "self_distillation/full_logit_distillation": float(self_distillation_config.full_logit_distillation),
-            "self_distillation/mask_fraction": loss_mask.float().mean().item(),
-            "self_distillation/variant_code": {"rkl_token": 3.0, "full_logit_all": 0.0,}[distill_variant],
-            "self_distillation/kl_type_code": (
-                kl_type_code if self_distillation_config.full_logit_distillation else 3.0
-            ),
-            "self_distillation/is_clip": (
-                float(self_distillation_config.is_clip) if self_distillation_config.is_clip is not None else -1.0
-            ),
-        }
-    )
-    return loss, metrics
-
-
 @deprecated("verl.trainer.ppo.core_algos.compute_policy_loss_vanilla")
 def compute_policy_loss(
     old_log_prob,
@@ -1391,6 +1272,124 @@ def compute_policy_loss(
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+
+@register_policy_loss("sdpo")  # type: ignore[arg-type]
+def compute_self_distillation_loss(
+    old_log_prob: torch.Tensor,
+    log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    teacher_log_probs: Optional[torch.Tensor] = None,
+    student_full_log_probs: Optional[torch.Tensor] = None,
+    teacher_full_log_probs: Optional[torch.Tensor] = None,
+    self_distillation_mask: Optional[torch.Tensor] = None,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute the SDPO distillation loss for actor updates.
+
+    Args:
+        old_log_probs: old policy log-probabilities for IS clipping.
+        log_probs: Student token log-probabilities, shape (batch_size, response_length).
+        advantages: Advantage estimates for each action for calculate GRPO Loss, shape (batch_size, response_length).
+        response_mask: Response token mask, shape (batch_size, response_length).
+        teacher_log_probs: Teacher token log-probabilities, shape (batch_size, response_length).
+        student_full_log_probs: Optional student full-vocab log-probabilities for full-logit distillation.
+        teacher_full_log_probs: Optional teacher full-vocab log-probabilities for full-logit distillation.
+        self_distillation_mask: Optional per-sample SDPO mask; masked samples are excluded from distillation.
+        loss_agg_mode: Loss aggregation mode.
+        config: config for the actor.
+        rollout_is_weights: Optional rollout correction IS weights.
+
+    Returns:
+        tuple[torch.Tensor, dict[str, Any]]:
+            - Distillation loss scalar.
+            - Metrics dictionary for debugging and monitoring.
+    """
+
+    self_distillation_cfg = getattr(config, "self_distillation", None)
+    if self_distillation_cfg is None:
+        raise ValueError("SDPO is enabled but self_distillation config is missing.")
+    grpo_lambda = self_distillation_cfg.grpo_lambda if self_distillation_cfg.grpo_lambda is not None else 0.0
+
+    loss_mask = response_mask
+    if self_distillation_mask is not None:
+        loss_mask = loss_mask * self_distillation_mask.unsqueeze(1)
+
+    loss, metrics = None, {}
+    if grpo_lambda > 0.0:
+        pg_loss, pg_metrics = compute_policy_loss_vanilla(
+            old_log_prob=old_log_prob, log_prob=log_prob, advantages=advantages,
+            response_mask=response_mask, loss_agg_mode=loss_agg_mode, config=self.config,
+            rollout_is_weights=rollout_is_weights,
+        )
+        metrics.update(pg_metrics)
+        loss = grpo_lambda * pg_loss
+
+    if self_distillation_config.full_logit_distillation:
+        if student_full_log_probs is None or teacher_full_log_probs is None:
+            raise ValueError("full_logit_distillation requires student_full_log_probs and teacher_full_log_probs.")
+        student_distill_log_probs = student_full_log_probs
+        teacher_distill_log_probs = teacher_full_log_probs
+
+        if self_distillation_config.alpha == 0.0:
+            kl_loss = F.kl_div(student_distill_log_probs, teacher_distill_log_probs, reduction="none", log_target=True)
+        elif self_distillation_config.alpha == 1.0:
+            kl_loss = F.kl_div(teacher_distill_log_probs, student_distill_log_probs, reduction="none", log_target=True)
+        else:
+            # Compute the log of the mixture distribution
+            # log(a + b) = log(exp(log(a)) + exp(log(b))) -> for mixture
+            alpha = torch.tensor(
+                self_distillation_config.alpha,
+                dtype=student_distill_log_probs.dtype,
+                device=student_distill_log_probs.device,
+            )
+            mixture_log_probs = torch.logsumexp(
+                torch.stack(
+                    [
+                        student_distill_log_probs + torch.log(1 - alpha),
+                        teacher_distill_log_probs + torch.log(alpha),
+                    ]
+                ),
+                dim=0,
+            )
+            kl_teacher = F.kl_div(mixture_log_probs, teacher_distill_log_probs, reduction="none", log_target=True)
+            kl_student = F.kl_div(mixture_log_probs, student_distill_log_probs, reduction="none", log_target=True)
+            # Compute the generalized Jensen-Shannon divergence.
+            kl_loss = torch.lerp(kl_student, kl_teacher, alpha)
+
+        per_token_loss = kl_loss.sum(-1)
+    else:
+        assert self_distillation_config.alpha == 1.0, "Only reverse KL is supported for non-full-logit distillation"
+        assert teacher_log_probs is not None, "SDPO requires `teacher_log_probs`."
+        log_ratio = student_log_probs - teacher_log_probs
+        per_token_loss = log_ratio.detach() * student_log_probs
+
+    is_clip = self_distillation_config.is_clip
+    if is_clip is not None:
+        if old_log_probs is None:
+            raise ValueError("old_log_probs is required for distillation IS ratio.")
+
+        negative_approx_kl = (student_log_probs - old_log_probs).detach()
+        negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+        ratio = torch.exp(negative_approx_kl).clamp(max=is_clip)
+        per_token_loss = per_token_loss * ratio
+
+    # Apply rollout correction weights if provided
+    if rollout_is_weights is not None:
+        per_token_loss = per_token_loss * rollout_is_weights
+
+    sdpo_loss = agg_loss(
+        loss_mat=per_token_loss,
+        loss_mask=loss_mask,
+        loss_agg_mode=loss_agg_mode,
+        batch_num_tokens=loss_mask.sum().clamp(min=1.0),
+    )
+    loss = sdpo_loss if loss is None else (loss + ((1.0 - grpo_lambda) * sdpo_loss))
+    metrics["self_distillation/empty_target_batch"] = loss_mask.sum().item() == 0
+    return loss, metrics
 
 
 @register_policy_loss("vanilla")  # type: ignore[arg-type]

@@ -292,6 +292,9 @@ self_distillation:
   # IS clip for loss; null disables IS weighting
   is_clip: 2
 
+  # To Control GRPO and SDPO loss: loss = lambda * grpo_loss + (1.0 - lambda) * sdpo_loss
+  grpo_lambda: 0.5
+
   # Reprompting template - available variables: prompt, successful_previous_attempt, feedback
   reprompt_template: |-
     {prompt}{solution}{feedback}

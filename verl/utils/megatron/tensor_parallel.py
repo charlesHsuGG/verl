@@ -106,6 +106,36 @@ def get_tensor_parallel_partition_stride(param):
     return param.partition_stride
 
 
+class _VocabParallelLogSoftmax(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, vocab_parallel_logits: torch.Tensor, dim=-1) -> torch.Tensor:
+
+        logits_max = vocab_parallel_logits.max(dim=dim, keepdim=True).values
+        dist.all_reduce(logits_max, op=dist.ReduceOp.MAX, group=mpu.get_tensor_model_parallel_group())
+
+        normalized_vocab_parallel_logits = vocab_parallel_logits - logits_max
+        normalized_exp_logits = normalized_vocab_parallel_logits.exp_()
+        normalized_sum_exp_logits = normalized_exp_logits.sum(dim=-1, keepdim=True)
+        dist.all_reduce(normalized_sum_exp_logits, group=mpu.get_tensor_model_parallel_group())
+        log_softmax_logits = normalized_vocab_parallel_logits - torch.log(normalized_sum_exp_logits)
+        ctx.save_for_backward(torch.exp(log_probs))
+        ctx.dim = dim
+        return log_softmax_logits
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+        softmax_logits, = ctx.saved_tensors
+
+        grad_input = softmax_logits
+        # grad_input = grad_output - (sum(grad_output) * softmax_logits)
+        # -1 * (sum(grad_output) * grad_input) + grad_output = grad_input
+        grad_input.mul_(grad_output.sum(dim=ctx.dim, keepdim=True))
+        grad_input.mul_(-1)
+        grad_input.add_(grad_output)
+        return softmax_logits
+
+
 class _VocabParallelEntropy(torch.autograd.Function):
     @staticmethod
     def forward(ctx, vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
@@ -137,6 +167,18 @@ class _VocabParallelEntropy(torch.autograd.Function):
         vocab_parallel_logits.add_(sum_softmax_times_logits)
         softmax_logits.mul_(-1)
         return softmax_logits
+
+
+def vocab_parallel_log_softmax(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
+    """Compute softmax when the logits are sharded in tp ranks
+
+    Args:
+        vocab_parallel_logits: (total_nnz, vocab_size // tp_size)
+
+    Returns: (total_nnz, vocab_size)
+
+    """
+    return _VocabParallelLogSoftmax.apply(vocab_parallel_logits)
 
 
 def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
