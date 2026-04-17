@@ -219,6 +219,7 @@ class DataParallelPPOActor(BasePPOActor):
         temperature: float,
         calculate_entropy: bool = False,
         compute_full_log_probs: bool = False,
+        top_k_log_probs: Optional[int] = None
     ) -> dict[str, torch.Tensor]:
         """
         Returns:
@@ -368,7 +369,27 @@ class DataParallelPPOActor(BasePPOActor):
                 else:
                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                     logits_rmpad.div_(temperature)
-                    full_log_probs_rmpad = torch.log_softmax(logits_rmpad, dim=-1) if compute_full_log_probs else None
+                    if compute_full_log_probs and top_k_log_probs is not None:
+                        topk = min(top_k_log_probs, logits_rmpad.shape[-1])
+                        topk_logits_rmpad, topk_indices_rmpad = torch.topk(logits_rmpad, topk, dim=-1)
+                        logsumexp_rmpad = torch.logsumexp(logits_rmpad, dim=-1, keepdim=True)
+                        full_log_probs_rmpad = topk_logits_rmpad - logsumexp_rmpad
+                    else:
+                        if compute_full_log_probs and micro_batch.get("topk_indices", None) is not None:
+                            topk_indices = micro_batch["topk_indices"]
+
+                            topk = topk_indices.size(-1)
+                            full_topk_indices = torch.zeros(batch_size, seqlen, topk, device=topk_indices.device, dtype=topk_indices.dtype,)
+                            full_topk_indices[:, -response_length - 1 : -1, :] = topk_indices
+                            topk_indices_rmpad = index_first_axis(rearrange(full_topk_indices, "b s k -> (b s) k"), indices)
+                            if self.use_ulysses_sp:
+                                topk_indices_rmpad = slice_input_tensor(topk_indices_rmpad.unsqueeze(0), dim=1, padding=True).squeeze(0)
+                            topk_logits_rmpad = torch.gather(logits_rmpad, dim=-1, index=topk_indices_rmpad)
+                            logsumexp_rmpad = torch.logsumexp(logits_rmpad, dim=-1, keepdim=True)
+                            full_log_probs_rmpad = topk_logits_rmpad - logsumexp_rmpad
+                        else:
+                            full_log_probs_rmpad = torch.log_softmax(logits_rmpad, dim=-1) if compute_full_log_probs else None
+                        topk_indices_rmpad = None
 
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                     inplace_backward = True
@@ -419,6 +440,20 @@ class DataParallelPPOActor(BasePPOActor):
                         sum_pi_squared_rmpad = gather_outputs_and_unpad(
                             sum_pi_squared_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size
                         )
+                    if full_log_probs_rmpad is not None:
+                        full_log_probs_rmpad = gather_outputs_and_unpad(
+                            full_log_probs_rmpad,
+                            gather_dim=0,
+                            unpad_dim=0,
+                            padding_size=pad_size,
+                        )
+                    if topk_indices_rmpad is not None:
+                        topk_indices_rmpad = gather_outputs_and_unpad(
+                            topk_indices_rmpad,
+                            gather_dim=0,
+                            unpad_dim=0,
+                            padding_size=pad_size,
+                        )
 
                 if is_mask_all_zero:
                     log_probs = log_probs[:0]
@@ -426,6 +461,8 @@ class DataParallelPPOActor(BasePPOActor):
                         entropy_rmpad = entropy_rmpad[:0]
                     if full_log_probs_rmpad is not None:
                         full_log_probs_rmpad = full_log_probs_rmpad[:0]
+                    if topk_indices_rmpad is not None:
+                        topk_indices_rmpad = topk_indices_rmpad[:0]
 
                 # pad back to (bsz, seqlen)
                 if calculate_entropy:
@@ -448,6 +485,12 @@ class DataParallelPPOActor(BasePPOActor):
                     batch=batch_size,
                     seqlen=seqlen,
                 ) if full_log_probs_rmpad is not None else None
+                full_topk_indices = pad_input(
+                    hidden_states=topk_indices_rmpad,
+                    indices=indices,
+                    batch=batch_size,
+                    seqlen=seqlen,
+                ) if topk_indices_rmpad is not None else None
                 log_probs = pad_input(
                     hidden_states=log_probs.unsqueeze(-1),
                     indices=indices,
@@ -464,6 +507,8 @@ class DataParallelPPOActor(BasePPOActor):
                 log_probs = log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
                 if full_log_probs is not None:
                     full_log_probs = full_log_probs[:, -response_length - 1 : -1, :]
+                if full_topk_indices is not None:
+                    full_topk_indices = full_topk_indices[:, -response_length - 1 : -1, :]
 
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}
@@ -490,7 +535,21 @@ class DataParallelPPOActor(BasePPOActor):
                     logits.div_(temperature)
                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
-                    full_log_probs = torch.log_softmax(logits, dim=-1) if compute_full_log_probs else None else None
+                    if compute_full_log_probs and top_k_log_probs is not None:
+                        topk = min(top_k_log_probs, logits.shape[-1])
+                        topk_logits, topk_indices = torch.topk(logits, topk, dim=-1)
+                        logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
+                        full_log_probs = topk_logits - logsumexp
+                    else:
+                        if compute_full_log_probs and micro_batch.get("topk_indices", None) is not None:
+                            topk_indices = micro_batch["topk_indices"]
+
+                            topk_logits = torch.gather(logits, dim=-1, index=topk_indices)
+                            logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
+                            full_log_probs = topk_logits - logsumexp
+                        else:
+                            full_log_probs = torch.log_softmax(logits, dim=-1) if compute_full_log_probs else None else None
+                        topk_indices = None
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
                             entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
@@ -511,6 +570,8 @@ class DataParallelPPOActor(BasePPOActor):
                 outputs["sum_pi_squared"] = sum_pi_squared
             if compute_full_log_probs:
                 outputs["full_log_probs"] = full_log_probs
+            if topk_indices is not None:
+                outputs["topk_indices"] = topk_indices
             return outputs
 
     def _optimizer_step(self):
@@ -764,6 +825,7 @@ class DataParallelPPOActor(BasePPOActor):
                         temperature=temperature,
                         calculate_entropy=calculate_entropy,
                         compute_full_log_probs=compute_full_log_probs,
+                        top_k_log_probs=self_distillation_cfg.distillation_topk if compute_full_log_probs else None
                     )
                     log_prob = outputs["log_probs"]
                     entropy = outputs["entropys"] if calculate_entropy else None
@@ -789,6 +851,7 @@ class DataParallelPPOActor(BasePPOActor):
                             "input_ids": model_inputs["teacher_input_ids"],
                             "attention_mask": model_inputs["teacher_attention_mask"],
                             "position_ids": model_inputs["teacher_position_ids"],
+                            "topk_indices": model_inputs.get("topk_indices", None),
                         }
                         teacher_model = trust_region_teacher or self.teacher_module or self.actor_module
                         with torch.no_grad():

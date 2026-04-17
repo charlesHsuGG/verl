@@ -21,6 +21,7 @@ At each training step:
 
 - `actor_rollout_ref.actor.policy_loss.loss_mode: sdpo`
 - `actor_rollout_ref.actor.self_distillation.full_logit_distillation`
+- `actor_rollout_ref.actor.self_distillation.distillation_topk`
 - `actor_rollout_ref.actor.self_distillation.alpha`
 - `actor_rollout_ref.actor.self_distillation.success_reward_threshold`
 - `actor_rollout_ref.actor.self_distillation.teacher_regularization` (`ema`, `trust_region`, or `none`)

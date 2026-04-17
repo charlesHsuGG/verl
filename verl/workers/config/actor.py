@@ -54,6 +54,8 @@ class SelfDistillationConfig(BaseConfig):
         teacher_update_rate (Optional[float]): Teacher update/mixing rate in [0,1].
             If null, falls back to ema_update_rate.
         ema_update_rate (float): Deprecated alias for teacher_update_rate.
+        distillation_topk (Optional[int]): If set, use top-k logits for distillation.
+        distillation_add_tail (bool): Whether to add a tail bucket for top-k distillation.
         max_reprompt_len (int): Maximum length of the reprompted prompt.
         reprompt_truncation (str): Truncation method for the reprompted prompt
             (recommended to use "right" or "error").
@@ -78,6 +80,8 @@ class SelfDistillationConfig(BaseConfig):
     teacher_regularization: str = "ema"
     teacher_update_rate: Optional[float] = None
     ema_update_rate: float = 0.05
+    distillation_topk: Optional[int] = None
+    distillation_add_tail: bool = True
     max_reprompt_len: int = 10240
     reprompt_truncation: str = "right"
     dont_reprompt_on_self_success: bool = False
@@ -103,6 +107,8 @@ class SelfDistillationConfig(BaseConfig):
             raise ValueError(f"self_distillation.ema_update_rate must be in [0,1], got {self.ema_update_rate}")
         if self.teacher_update_rate is not None and not 0.0 <= self.teacher_update_rate <= 1.0:
             raise ValueError(f"self_distillation.teacher_update_rate must be in [0,1], got {self.teacher_update_rate}")
+        if self.distillation_topk is not None and self.distillation_topk <= 0:
+            raise ValueError(f"self_distillation.distillation_topk must be a positive integer, got {self.distillation_topk}")
         if self.is_clip is not None and self.is_clip <= 0:
             raise ValueError(f"self_distillation.is_clip must be positive, got {self.is_clip}")
 

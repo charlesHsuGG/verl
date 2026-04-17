@@ -1334,6 +1334,28 @@ def compute_self_distillation_loss(
         student_distill_log_probs = student_full_log_probs
         teacher_distill_log_probs = teacher_full_log_probs
 
+        if self_distillation_cfg.distillation_topk is not None:
+            def add_tail(log_probs: torch.Tensor) -> torch.Tensor:
+                # Compute tail log-probability using logsumexp for numerical stability
+                # log(1 - sum(p_i)) = log(1 - exp(log_sum_exp(log(p_i))))
+                log_s = torch.logsumexp(log_probs, dim=-1, keepdim=True)
+                # Clamp to avoid log_s >= 0 (sum(probs) >= 1).
+                log_s = torch.clamp(log_s, max=-1e-7)
+                # 1 - exp(x) = -(exp(x) - 1) with better precision from expm1.
+                tail_log = torch.log(-torch.expm1(log_s))
+                return torch.cat([log_probs, tail_log], dim=-1)
+
+            def renorm_topk_log_probs(logp: torch.Tensor) -> torch.Tensor:
+                logZ = torch.logsumexp(logp, dim=-1, keepdim=True)
+                return logp - logZ
+            
+            if self_distillation_config.distillation_add_tail:
+                student_distill_log_probs = add_tail(student_distill_log_probs)
+                teacher_distill_log_probs = add_tail(teacher_distill_log_probs)
+            else:
+                student_distill_log_probs = renorm_topk_log_probs(student_distill_log_probs)
+                teacher_distill_log_probs = renorm_topk_log_probs(teacher_distill_log_probs)
+
         if self_distillation_config.alpha == 0.0:
             kl_loss = F.kl_div(student_distill_log_probs, teacher_distill_log_probs, reduction="none", log_target=True)
         elif self_distillation_config.alpha == 1.0:

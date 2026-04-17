@@ -50,7 +50,10 @@ from verl.utils.megatron.router_replay_utils import (
     reorder_and_merge_vpp_layers,
     set_router_replay_data,
 )
-from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits, vocab_parallel_log_softmax
+from verl.utils.megatron.tensor_parallel import (
+    vocab_parallel_entropy, vocab_parallel_log_probs_from_logits, vocab_parallel_log_softmax,
+    vocab_parallel_topk_log_softmax
+)
 from verl.utils.megatron_utils import get_megatron_mtp_loss, get_model_config, unwrap_model
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
@@ -637,6 +640,7 @@ class MegatronPPOActor(BasePPOActor):
         max_token_len=None,
         mini_batch_size=None,
         compute_full_log_probs: bool = False,
+        top_k_log_probs: Optional[int] = None
     ):
         """
         We assume:
@@ -756,6 +760,9 @@ class MegatronPPOActor(BasePPOActor):
                     student_full_log_probs = data.get("full_log_probs", None)
                     teacher_log_probs, teacher_full_log_probs = data["teacher_log_probs"], data.get("teacher_full_log_probs", None)
                     self_distillation_mask = data.get("self_distillation_mask", None)
+
+                    if teacher_full_log_probs is not None and output.get("topk_indices", None) is not None:
+                        teacher_full_log_probs = torch.gather(teacher_full_log_probs, dim=-1, index=output["topk_indices"])
                     
                     pg_loss, pg_metrics = compute_self_distillation_loss(
                         old_log_probs=old_log_prob,
@@ -929,7 +936,11 @@ class MegatronPPOActor(BasePPOActor):
                     log_probs = log_probs.masked_fill(~label_mask, 0.0)
                     ret["log_probs"] = log_probs
                     if compute_full_log_probs:
-                        ret["full_log_probs"] = vocab_parallel_log_softmax(logits_bak)
+                        if top_k_log_probs is not None:
+                            topk_log_probs, topk_indices = vocab_parallel_topk_log_softmax(logits_bak, topk=top_k_log_probs)
+                            ret.update({"full_log_probs": topk_log_probs, "topk_indices": topk_indices})
+                        else:
+                            ret["full_log_probs"] = vocab_parallel_log_softmax(logits_bak)
                     return ret
 
                 logits_processor_args = {"label": label, "label_mask": label_mask}
