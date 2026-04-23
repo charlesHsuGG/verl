@@ -1080,15 +1080,15 @@ class AgentLoopManager:
 
         return timing
 
-    @auto_await
-    async def wake_up(self):
-        """Wake up all rollout replica instances."""
-        await asyncio.gather(*[replica.wake_up() for replica in self.rollout_replicas])
+    # @auto_await
+    # async def wake_up(self):
+    #     """Wake up all rollout replica instances."""
+    #     await asyncio.gather(*[replica.wake_up() for replica in self.rollout_replicas])
 
-    @auto_await
-    async def sleep(self):
-        """Sleep all rollout replica instances."""
-        await asyncio.gather(*[replica.sleep() for replica in self.rollout_replicas])
+    # @auto_await
+    # async def sleep(self):
+    #     """Sleep all rollout replica instances."""
+    #     await asyncio.gather(*[replica.sleep() for replica in self.rollout_replicas])
 
     @auto_await
     async def clear_kv_cache(self):
