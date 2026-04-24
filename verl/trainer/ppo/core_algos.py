@@ -1312,23 +1312,14 @@ def compute_self_distillation_loss(
     self_distillation_cfg = getattr(config, "self_distillation", None)
     if self_distillation_cfg is None:
         raise ValueError("SDPO is enabled but self_distillation config is missing.")
-    grpo_lambda = self_distillation_cfg.grpo_lambda if self_distillation_cfg.grpo_lambda is not None else 0.0
+    lmbda = self_distillation_cfg.lmbda if self_distillation_cfg.lmbda is not None else 1.0
 
     loss_mask = response_mask
     if self_distillation_mask is not None:
         loss_mask = loss_mask * self_distillation_mask.unsqueeze(1)
 
-    loss, metrics = None, {}
-    if grpo_lambda > 0.0:
-        pg_loss, pg_metrics = compute_policy_loss_vanilla(
-            old_log_prob=old_log_prob, log_prob=log_prob, advantages=advantages,
-            response_mask=response_mask, loss_agg_mode=loss_agg_mode, config=self.config,
-            rollout_is_weights=rollout_is_weights,
-        )
-        metrics.update(pg_metrics)
-        loss = grpo_lambda * pg_loss
-
-    if self_distillation_config.full_logit_distillation:
+    metrics = {}
+    if self_distillation_cfg.full_logit_distillation:
         if student_full_log_probs is None or teacher_full_log_probs is None:
             raise ValueError("full_logit_distillation requires student_full_log_probs and teacher_full_log_probs.")
         student_distill_log_probs = student_full_log_probs
@@ -1403,14 +1394,20 @@ def compute_self_distillation_loss(
     if rollout_is_weights is not None:
         per_token_loss = per_token_loss * rollout_is_weights
 
-    sdpo_loss = agg_loss(
-        loss_mat=per_token_loss,
-        loss_mask=loss_mask,
-        loss_agg_mode=loss_agg_mode,
+    loss = agg_loss(
+        loss_mat=per_token_loss, loss_mask=loss_mask, loss_agg_mode=loss_agg_mode,
         batch_num_tokens=loss_mask.sum().clamp(min=1.0),
     )
-    loss = sdpo_loss if loss is None else (loss + ((1.0 - grpo_lambda) * sdpo_loss))
     metrics["self_distillation/empty_target_batch"] = loss_mask.sum().item() == 0
+    
+    if lmbda < 1.0:
+        pg_loss, pg_metrics = compute_policy_loss_vanilla(
+            old_log_prob=old_log_prob, log_prob=log_prob, advantages=advantages,
+            response_mask=response_mask, loss_agg_mode=loss_agg_mode, config=self.config,
+            rollout_is_weights=rollout_is_weights,
+        )
+        loss = lmbda * loss + (1 - lmbda) * pg_loss
+        metrics.update(pg_metrics)
     return loss, metrics
 
 

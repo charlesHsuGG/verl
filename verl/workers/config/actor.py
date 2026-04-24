@@ -63,7 +63,7 @@ class SelfDistillationConfig(BaseConfig):
         remove_thinking_from_demonstration (bool): Whether to remove <think>...</think>
             tags from successful demonstrations before reprompting.
         is_clip (Optional[float]): Clip value for distillation IS ratio; None disables IS weighting.
-        grpo_lambda (Optional[float]): GRPO lambda can control SDPO and GRPO, in SDPO paper prove it work on weaker model. None disables Calculate GRPO Loss.
+        lmbda (Optional[float]): GRPO lambda can control SDPO and GRPO, in SDPO paper prove it work on weaker model. None disables Calculate GRPO Loss.
         reprompt_template (str): Template for reprompting. Uses {prompt}, {solution}, {feedback} placeholders.
         solution_template (str): Template for formatting solution section.
             Uses {successful_previous_attempt} placeholder.
@@ -87,7 +87,7 @@ class SelfDistillationConfig(BaseConfig):
     dont_reprompt_on_self_success: bool = False
     remove_thinking_from_demonstration: bool = False
     is_clip: Optional[float] = None
-    grpo_lambda: Optional[float] = None
+    lmbda: Optional[float] = None
     reprompt_template: str = "{prompt}{solution}{feedback}\n\nCorrectly solve the original question.\n"
     solution_template: str = "\nCorrect solution:\n\n{successful_previous_attempt}\n\n"
     feedback_template: str = "\nThe following is feedback from your unsuccessful earlier attempt:\n\n{feedback_raw}\n\n"

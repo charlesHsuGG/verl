@@ -260,6 +260,9 @@ self_distillation:
   # KL interpolation coefficient: 0.0=forward KL, 1.0=reverse KL, in-between=JSD
   alpha: 0.5
 
+  # To Control GRPO and SDPO loss: loss = grpo_loss + lambda * sdpo_loss
+  lmbda: 0.5
+
   # Minimum sequence reward to be considered successful
   success_reward_threshold: 0.5
 
@@ -297,9 +300,6 @@ self_distillation:
 
   # IS clip for loss; null disables IS weighting
   is_clip: 2
-
-  # To Control GRPO and SDPO loss: loss = lambda * grpo_loss + (1.0 - lambda) * sdpo_loss
-  grpo_lambda: 0.5
 
   # Reprompting template - available variables: prompt, successful_previous_attempt, feedback
   reprompt_template: |-
