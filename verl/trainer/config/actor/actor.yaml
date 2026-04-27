@@ -261,7 +261,7 @@ self_distillation:
   alpha: 0.5
 
   # To Control GRPO and SDPO loss: loss = grpo_loss + lambda * sdpo_loss
-  lmbda: 0.5
+  lmbda: 1.0
 
   # Minimum sequence reward to be considered successful
   success_reward_threshold: 0.5

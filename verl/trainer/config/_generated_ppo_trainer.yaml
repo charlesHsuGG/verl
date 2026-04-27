@@ -143,7 +143,7 @@ actor_rollout_ref:
       include_environment_feedback: true
       environment_feedback_only_without_solution: true
       is_clip: 2
-      lmbda: 0.5
+      lmbda: 1.0
       reprompt_template: '{prompt}{solution}{feedback}
 
 
