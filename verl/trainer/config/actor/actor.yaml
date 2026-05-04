@@ -248,6 +248,9 @@ self_distillation:
 
   # Distillation is enabled when policy_loss.loss_mode == "sdpo"
 
+  # Whether to use SDRLVR-style ratio weighting for distillation loss, which can stabilize training when teacher and student are significantly different. Requires `teacher_log_probs` to be returned by the model.
+  use_sdrlvr: False
+
   # Whether to use full-logit KL distillation
   full_logit_distillation: False
 
@@ -262,6 +265,10 @@ self_distillation:
 
   # To Control GRPO and SDPO loss: loss = grpo_loss + lambda * sdpo_loss
   lmbda: 1.0
+
+  # SDRLVR ratio weighting clip range; only effective when use_sdrlvr is True
+  sdrlvr_clip_ratio_low: -20.0
+  sdrlvr_clip_ratio_high: 20.0
 
   # Minimum sequence reward to be considered successful
   success_reward_threshold: 0.5

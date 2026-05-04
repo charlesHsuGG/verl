@@ -37,8 +37,8 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
-
-from verl.utils.device import get_device_capability, get_device_name, is_cuda_available
+from verl.utils.device import (get_device_capability, get_device_name,
+                               is_cuda_available)
 
 try:
     import triton
@@ -68,7 +68,7 @@ if not HAVE_TRITON:
 
             return inner
 
-    triton = MagicMock()
+    triton = MagicMock()  # noqa
     triton.jit = null_decorator
     triton.autotune = null_decorator
     tl = MagicMock()
@@ -176,7 +176,7 @@ def set_backward_method(backward_method: BackwardEnum):
     """
     Set the backward method.
     """
-    global _config
+    global _config  # noqa
     _config._backward = backward_method
 
 
@@ -582,7 +582,7 @@ def efficient_entropy_forward(
     assert hidden.shape[0] == labels.shape[0] and hidden.shape[1] == weight.shape[1]
 
     _rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
-    _world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
+    _world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)  # noqa
 
     if dist_process_group is not None and not hasattr(efficient_entropy_forward, "_initialized"):
         global _dedicated_stream, _dedicated_events
@@ -1536,7 +1536,7 @@ def efficient_entropy_backward(
     assert hidden.shape[0] == labels.shape[0] and hidden.shape[1] == weight.shape[1]
 
     _rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
-    _world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
+    _world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)  # noqa
 
     num_tokens, hidden_size = hidden.shape
     num_tokens = labels.shape[0]
@@ -1710,14 +1710,14 @@ def efficient_entropy_backward(
 
             if split_idx == 0:
                 torch.matmul(
-                    _d_logits, weight[split_idx * vocab_per_split : (split_idx + 1) * vocab_per_split, :], out=d_hidden
+                    _d_logits, weight[split_idx * vocab_per_split: (split_idx + 1) * vocab_per_split, :], out=d_hidden
                 )
             else:
                 d_hidden += torch.matmul(
-                    _d_logits, weight[split_idx * vocab_per_split : (split_idx + 1) * vocab_per_split, :]
+                    _d_logits, weight[split_idx * vocab_per_split: (split_idx + 1) * vocab_per_split, :]
                 )
             torch.matmul(
-                _d_logits.T, hidden, out=d_weight[split_idx * vocab_per_split : (split_idx + 1) * vocab_per_split, :]
+                _d_logits.T, hidden, out=d_weight[split_idx * vocab_per_split: (split_idx + 1) * vocab_per_split, :]
             )
 
     elif _config._backward == BackwardEnum._Split_Dlogits_M:

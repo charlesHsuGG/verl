@@ -16,13 +16,13 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from omegaconf import MISSING
-
 from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig, RolloutCorrectionConfig
 from verl.utils.profiler.config import ProfilerConfig
 from verl.utils.qat import QATConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig, TorchtitanEngineConfig, VeOmniEngineConfig
+from .engine import (FSDPEngineConfig, McoreEngineConfig,
+                     TorchtitanEngineConfig, VeOmniEngineConfig)
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
@@ -45,6 +45,7 @@ class SelfDistillationConfig(BaseConfig):
 
     Args:
         Distillation is enabled when policy_loss.loss_mode == "sdpo".
+        use_sdrlvr (bool): Whether to use SDRLVR-style ratio weighting for distillation loss.
         full_logit_distillation (bool): Whether to use full-logit KL distillation.
         alpha (float): KL interpolation coefficient.
             0.0=forward KL, 1.0=reverse KL, in-between=JSD.
@@ -64,6 +65,8 @@ class SelfDistillationConfig(BaseConfig):
             tags from successful demonstrations before reprompting.
         is_clip (Optional[float]): Clip value for distillation IS ratio; None disables IS weighting.
         lmbda (Optional[float]): GRPO lambda can control SDPO and GRPO, in SDPO paper prove it work on weaker model. None disables Calculate GRPO Loss.
+        sdrlvr_ratio_low (float): Lower bound for SDRLVR ratio weighting.
+        sdrlvr_ratio_high (float): Upper bound for SDRLVR ratio weighting.
         reprompt_template (str): Template for reprompting. Uses {prompt}, {solution}, {feedback} placeholders.
         solution_template (str): Template for formatting solution section.
             Uses {successful_previous_attempt} placeholder.
@@ -74,6 +77,7 @@ class SelfDistillationConfig(BaseConfig):
             when no solution is available (ignore feedback when solution exists).
     """
 
+    use_sdrlvr: bool = False
     full_logit_distillation: bool = False
     alpha: float = 0.0
     success_reward_threshold: float = 1.0
@@ -88,6 +92,8 @@ class SelfDistillationConfig(BaseConfig):
     remove_thinking_from_demonstration: bool = False
     is_clip: Optional[float] = None
     lmbda: Optional[float] = None
+    sdrlvr_clip_ratio_low: float = -20.0
+    sdrlvr_clip_ratio_high: float = 20.0
     reprompt_template: str = "{prompt}{solution}{feedback}\n\nCorrectly solve the original question.\n"
     solution_template: str = "\nCorrect solution:\n\n{successful_previous_attempt}\n\n"
     feedback_template: str = "\nThe following is feedback from your unsuccessful earlier attempt:\n\n{feedback_raw}\n\n"

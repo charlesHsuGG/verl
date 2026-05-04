@@ -26,7 +26,9 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from megatron.core import ModelParallelConfig, mpu, parallel_state, tensor_parallel
+import verl.utils.megatron.tensor_parallel as tp_utils
+from megatron.core import (ModelParallelConfig, mpu, parallel_state,
+                           tensor_parallel)
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.enums import ModelType
@@ -34,11 +36,10 @@ from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.parallel_state import get_global_memory_buffer
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.module import Float16Module
-from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
+from megatron.core.transformer.multi_token_prediction import \
+    MTPLossLoggingHelper
 from megatron.core.utils import get_attr_wrapped_model
 from transformers import PretrainedConfig
-
-import verl.utils.megatron.tensor_parallel as tp_utils
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.model import normalize_model_name
@@ -193,11 +194,13 @@ def make_megatron_module(
 
     if bridge is not None:
         if provider is None:
-            from verl.models.mcore.mbridge import freeze_moe_router, make_value_model
+            from verl.models.mcore.mbridge import (freeze_moe_router,
+                                                   make_value_model)
 
             value_model_hook = make_value_model
         else:
-            from verl.models.mcore.bridge import freeze_moe_router, make_value_model
+            from verl.models.mcore.bridge import (freeze_moe_router,
+                                                  make_value_model)
 
             hidden_size = (
                 hf_config.text_config.hidden_size if hasattr(hf_config, "text_config") else hf_config.hidden_size
@@ -220,7 +223,8 @@ def make_megatron_module(
             # Register PEFT transformation as pre-wrap hook if peft_cls is specified
             # This must happen BEFORE DDP wrapping to avoid KeyError with frozen parameters
             if peft_cls is not None:
-                from verl.utils.megatron_peft_utils import load_adapter_checkpoint, print_adapter_info
+                from verl.utils.megatron_peft_utils import (
+                    load_adapter_checkpoint, print_adapter_info)
 
                 def peft_pre_wrap_hook(model):
                     """Pre-wrap hook that applies PEFT transformation."""
@@ -252,7 +256,8 @@ def make_megatron_module(
             # Create DDP config if needed
             ddp_config = None
             if wrap_config.wrap_with_ddp:
-                from megatron.bridge.training.config import DistributedDataParallelConfig
+                from megatron.bridge.training.config import \
+                    DistributedDataParallelConfig
 
                 ddp_config_dict = {
                     "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
@@ -596,7 +601,7 @@ def offload_megatron_optimizer(optimizers):
 
     for _opt in _iter_opts(optimizers):
         offload_megatron_copy_params(_opt)
-        ## worker may hold zero parameter when enabling custom pipeline layout
+        # worker may hold zero parameter when enabling custom pipeline layout
         if _opt.optimizer is not None:
             # HybridDeviceOptimizer: offload all sub-optimizer states to CPU
             # TODO: this should be a method in Megatron-LM's HybridDeviceOptimizer
@@ -642,7 +647,7 @@ def load_megatron_optimizer(optimizers):
 
     for _opt in _iter_opts(optimizers):
         load_megatron_copy_params(_opt)
-        ## worker may hold zero parameter when enabling custom pipeline layout
+        # worker may hold zero parameter when enabling custom pipeline layout
         if _opt.optimizer is not None:
             # if we are using HybridDeviceOptimizer, we need to only move gpu optimizer state to gpu
             if hasattr(_opt.optimizer, "_move_new_state_to_right_device"):
@@ -687,9 +692,9 @@ def convert_megatron_model_to_transformers_model(
     new_params = {}
 
     def convert_qkv_shard(full_tensor, q_name, k_name, v_name):
-        nonlocal config
-        nonlocal tp_size
-        nonlocal num_query_groups
+        nonlocal config  # noqa
+        nonlocal tp_size  # noqa
+        nonlocal num_query_groups  # noqa
 
         q_shard_list = []
         k_shard_list = []
@@ -702,13 +707,13 @@ def convert_megatron_model_to_transformers_model(
             total_size = q_size_tp + 2 * kv_size_tp
             for i in range(tp_size):
                 num_query_groups_per_partition = num_query_groups // tp_size
-                qkv_part = full_tensor[i * total_size : (i + 1) * total_size]
+                qkv_part = full_tensor[i * total_size: (i + 1) * total_size]
                 q_size_chunk = q_size_tp // num_query_groups_per_partition
                 kv_size_chunk = kv_size_tp // num_query_groups_per_partition
                 for qkv_part_chunk in qkv_part.chunk(num_query_groups_per_partition):
                     q_part = qkv_part_chunk[:q_size_chunk]
-                    k_part = qkv_part_chunk[q_size_chunk : q_size_chunk + kv_size_chunk]
-                    v_part = qkv_part_chunk[q_size_chunk + kv_size_chunk :]
+                    k_part = qkv_part_chunk[q_size_chunk: q_size_chunk + kv_size_chunk]
+                    v_part = qkv_part_chunk[q_size_chunk + kv_size_chunk:]
                     q_shard_list.append(q_part)
                     k_shard_list.append(k_part)
                     v_shard_list.append(v_part)
@@ -718,13 +723,13 @@ def convert_megatron_model_to_transformers_model(
             total_size = q_size_tp + 2 * kv_size_tp
             for i in range(tp_size):
                 num_query_groups_per_partition = num_query_groups // tp_size
-                qkv_part = full_tensor[i * total_size : (i + 1) * total_size]
+                qkv_part = full_tensor[i * total_size: (i + 1) * total_size]
                 q_size_chunk = q_size_tp // num_query_groups_per_partition
                 kv_size_chunk = kv_size_tp // num_query_groups_per_partition
                 for qkv_part_chunk in qkv_part.chunk(num_query_groups_per_partition):
                     q_part = qkv_part_chunk[:q_size_chunk]
-                    k_part = qkv_part_chunk[q_size_chunk : q_size_chunk + kv_size_chunk]
-                    v_part = qkv_part_chunk[q_size_chunk + kv_size_chunk :]
+                    k_part = qkv_part_chunk[q_size_chunk: q_size_chunk + kv_size_chunk]
+                    v_part = qkv_part_chunk[q_size_chunk + kv_size_chunk:]
                     q_shard_list.append(q_part)
                     if i * config.num_key_value_heads % tp_size == 0:
                         k_shard_list.append(k_part)
@@ -735,14 +740,14 @@ def convert_megatron_model_to_transformers_model(
         new_params[v_name] = torch.cat(v_shard_list, dim=0)
 
     def convert_gate_up_shard(full_tensor, gate_name, up_name):
-        nonlocal config
-        nonlocal tp_size
+        nonlocal config  # noqa
+        nonlocal tp_size  # noqa
 
         intermediate_size_tp = config.intermediate_size // tp_size
         gate_weight_list = []
         up_weight_list = []
         for i in range(tp_size):
-            gate_up_weight_tp = full_tensor[intermediate_size_tp * 2 * i : intermediate_size_tp * 2 * (i + 1)]
+            gate_up_weight_tp = full_tensor[intermediate_size_tp * 2 * i: intermediate_size_tp * 2 * (i + 1)]
             gate_weight_tp = gate_up_weight_tp[:intermediate_size_tp]
             up_weight_tp = gate_up_weight_tp[intermediate_size_tp:]
             gate_weight_list.append(gate_weight_tp)
@@ -1039,7 +1044,7 @@ def per_tensor_generator(
 
         # (xya): this is a hack to fix the name of the parameters
         while cur_name.startswith("module."):
-            cur_name = cur_name[len("module.") :]
+            cur_name = cur_name[len("module."):]
 
         # EP
         if ".mlp.experts.linear_fc" in cur_name and ep_size > 1:
@@ -1255,7 +1260,8 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     from megatron.core.utils import get_model_config
 
     try:
-        from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
+        from megatron.core.distributed.fsdp.mcore_fsdp_adapter import \
+            FullyShardedDataParallel as megatron_FSDP
     except ImportError:
         megatron_FSDP = DDP
 
@@ -1377,7 +1383,8 @@ def patch_engine_mtp(module, model_config):
         model_config: The model configuration containing MTP settings.
     """
     logger.warning("Applying mtp patch...")
-    from verl.models.mcore.mtp_patch import patch_mtp_layer_get_embeddings, patch_postprocess
+    from verl.models.mcore.mtp_patch import (patch_mtp_layer_get_embeddings,
+                                             patch_postprocess)
 
     print(module)
 

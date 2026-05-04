@@ -23,22 +23,26 @@ from types import SimpleNamespace
 from typing import Optional
 
 import torch
+import verl.utils.torch_functional as verl_F
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.tensor import DTensor
-
-import verl.utils.torch_functional as verl_F
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, compute_self_distillation_loss, get_policy_loss_fn, kl_penalty
-from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
+from verl.trainer.ppo.core_algos import (
+    agg_loss, compute_self_distillation_loss,
+    compute_self_distillation_with_rlvr_loss, get_policy_loss_fn, kl_penalty)
+from verl.utils.attention_utils import (index_first_axis, pad_input, rearrange,
+                                        unpad_input)
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
-from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
+from verl.utils.seqlen_balancing import (prepare_dynamic_batch,
+                                         restore_dynamic_batch)
 from verl.utils.torch_dtypes import PrecisionType
 from verl.utils.torch_functional import logprobs_from_logits
-from verl.utils.ulysses import gather_outputs_and_unpad, slice_input_tensor, ulysses_pad, ulysses_pad_and_slice_inputs
+from verl.utils.ulysses import (gather_outputs_and_unpad, slice_input_tensor,
+                                ulysses_pad, ulysses_pad_and_slice_inputs)
 from verl.workers.actor import BasePPOActor
 from verl.workers.config import ActorConfig
 
@@ -122,7 +126,8 @@ class DataParallelPPOActor(BasePPOActor):
         self.device_name = get_device_name()
         self.param_dtype = PrecisionType.to_dtype(self.config.fsdp_config.get("dtype", "bfloat16"))
         if self.param_dtype == torch.float16:
-            from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+            from torch.distributed.fsdp.sharded_grad_scaler import \
+                ShardedGradScaler
 
             self.scaler = ShardedGradScaler(growth_interval=400)
         else:
@@ -238,14 +243,11 @@ class DataParallelPPOActor(BasePPOActor):
         # PrefixGrouper path for shared-prefix optimization
         if self.use_prefix_grouper:
             can_use_pg = (
-                not self.use_remove_padding
-                and not self.use_ulysses_sp
-                and not self.use_fused_kernels
-                and not self.use_dynamic_bsz
-                and not compute_full_log_probs
+                not self.use_remove_padding and not self.use_ulysses_sp and not self.use_fused_kernels and not self.use_dynamic_bsz and not compute_full_log_probs
             )
             if can_use_pg and "response_mask" in micro_batch and "uid" in micro_batch:
-                from verl.trainer.ppo.prefix_grouper_utils import forward_micro_batch_with_prefix_grouper
+                from verl.trainer.ppo.prefix_grouper_utils import \
+                    forward_micro_batch_with_prefix_grouper
 
                 return forward_micro_batch_with_prefix_grouper(
                     micro_batch=micro_batch,
@@ -312,7 +314,8 @@ class DataParallelPPOActor(BasePPOActor):
                         )
 
                 if "image_bound" in multi_modal_inputs:
-                    from verl.utils.dataset.vision_utils import process_multi_modal_inputs_for_minicpmo
+                    from verl.utils.dataset.vision_utils import \
+                        process_multi_modal_inputs_for_minicpmo  # pylint: disable=import-outside-toplevel
 
                     multi_modal_inputs = process_multi_modal_inputs_for_minicpmo(
                         input_ids, attention_mask, position_ids, cu_seqlens, multi_modal_inputs
@@ -320,6 +323,8 @@ class DataParallelPPOActor(BasePPOActor):
 
                 # for compute the log_prob
                 input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
+
+                sum_pi_squared = None
 
                 # pad and slice the inputs if sp > 1
                 if self.use_ulysses_sp:
@@ -380,7 +385,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                             topk = topk_indices.size(-1)
                             full_topk_indices = torch.zeros(batch_size, seqlen, topk, device=topk_indices.device, dtype=topk_indices.dtype,)
-                            full_topk_indices[:, -response_length - 1 : -1, :] = topk_indices
+                            full_topk_indices[:, -response_length - 1: -1, :] = topk_indices
                             topk_indices_rmpad = index_first_axis(rearrange(full_topk_indices, "b s k -> (b s) k"), indices)
                             if self.use_ulysses_sp:
                                 topk_indices_rmpad = slice_input_tensor(topk_indices_rmpad.unsqueeze(0), dim=1, padding=True).squeeze(0)
@@ -500,15 +505,15 @@ class DataParallelPPOActor(BasePPOActor):
 
                 # only return response part:
                 if calculate_entropy:
-                    entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+                    entropy = full_entropy.squeeze(-1)[:, -response_length - 1: -1]  # (bsz, response_length)
                 if calculate_sum_pi_squared:
                     # (bsz, response_length)
-                    sum_pi_squared = full_sum_pi_squared.squeeze(-1)[:, -response_length - 1 : -1]
-                log_probs = log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+                    sum_pi_squared = full_sum_pi_squared.squeeze(-1)[:, -response_length - 1: -1]
+                log_probs = log_probs.squeeze(-1)[:, -response_length - 1: -1]  # (bsz, response_length)
                 if full_log_probs is not None:
-                    full_log_probs = full_log_probs[:, -response_length - 1 : -1, :]
+                    full_log_probs = full_log_probs[:, -response_length - 1: -1, :]
                 if full_topk_indices is not None:
-                    full_topk_indices = full_topk_indices[:, -response_length - 1 : -1, :]
+                    full_topk_indices = full_topk_indices[:, -response_length - 1: -1, :]
 
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}
@@ -526,14 +531,14 @@ class DataParallelPPOActor(BasePPOActor):
                 )  # prevent model thinks we are generating
 
                 if self.use_fused_kernels:
-                    log_probs = output.log_probs[:, -response_length - 1 : -1]
-                    entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
+                    log_probs = output.log_probs[:, -response_length - 1: -1]
+                    entropy = output.entropy[:, -response_length - 1: -1]  # (bsz, response_length)
 
                 else:
                     logits = output.logits
 
                     logits.div_(temperature)
-                    logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
+                    logits = logits[:, -response_length - 1: -1, :]  # (bsz, response_length, vocab_size)
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
                     if compute_full_log_probs and top_k_log_probs is not None:
                         topk = min(top_k_log_probs, logits.shape[-1])
@@ -548,7 +553,7 @@ class DataParallelPPOActor(BasePPOActor):
                             logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
                             full_log_probs = topk_logits - logsumexp
                         else:
-                            full_log_probs = torch.log_softmax(logits, dim=-1) if compute_full_log_probs else None else None
+                            full_log_probs = torch.log_softmax(logits, dim=-1) if compute_full_log_probs else None
                         topk_indices = None
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
@@ -567,7 +572,7 @@ class DataParallelPPOActor(BasePPOActor):
             if calculate_entropy:
                 outputs["entropys"] = entropy
             if calculate_sum_pi_squared:
-                outputs["sum_pi_squared"] = sum_pi_squared
+                outputs["sum_pi_squared"] = sum_pi_squared  # pylint: disable=possibly-used-before-assignment
             if compute_full_log_probs:
                 outputs["full_log_probs"] = full_log_probs
             if topk_indices is not None:
@@ -715,7 +720,7 @@ class DataParallelPPOActor(BasePPOActor):
             missing = set(self_distillation_required_keys) - set(data.batch.keys())
             if missing:
                 raise ValueError(f"SDPO is enabled but required teacher keys are missing: {sorted(missing)}")
-            teacher_regularization = self.resolve_teacher_regularization(self_distillation_cfg) 
+            teacher_regularization = self.resolve_teacher_regularization(self_distillation_cfg)
             teacher_update_rate = self.resolve_teacher_update_rate(self_distillation_cfg)
             if teacher_regularization == "trust_region":
                 if self.use_fused_kernels:
@@ -861,21 +866,36 @@ class DataParallelPPOActor(BasePPOActor):
                                 calculate_entropy=False,
                                 compute_full_log_probs=compute_full_log_probs,
                             )
-                        student_full_log_probs = data.get("full_log_probs", None)
-                        teacher_log_prob, teacher_full_log_probs = teacher_outputs["log_probs"], teacher_outputs.get("full_log_probs", None)
-                        pg_loss, pg_metrics = compute_self_distillation_loss(
-                            old_log_probs=old_log_prob,
-                            log_probs=log_prob,
-                            advantages=advantages,
-                            response_mask=response_mask,
-                            teacher_log_probs=teacher_log_prob,
-                            student_full_log_probs=student_full_log_probs,
-                            teacher_full_log_probs=teacher_full_log_probs,
-                            self_distillation_mask=self_distillation_mask,
-                            loss_agg_mode=loss_agg_mode,
-                            config=self.config,
-                            rollout_is_weights=rollout_is_weights,
-                        )
+                        full_log_prob = data.get("full_log_probs", None)
+                        teacher_log_prob, teacher_full_log_prob = teacher_outputs["log_probs"], teacher_outputs.get("full_log_probs", None)
+                        if self_distillation_cfg.use_sdrlvr:
+                            pg_loss, pg_metrics = compute_self_distillation_with_rlvr_loss(
+                                old_log_prob=old_log_prob,
+                                log_prob=log_prob,
+                                advantages=advantages,
+                                response_mask=response_mask,
+                                full_log_prob=full_log_prob,
+                                teacher_log_prob=teacher_log_prob,
+                                teacher_full_log_prob=teacher_full_log_prob,
+                                self_distillation_mask=self_distillation_mask,
+                                loss_agg_mode=loss_agg_mode,
+                                config=self.config,
+                                rollout_is_weights=rollout_is_weights,
+                            )
+                        else:
+                            pg_loss, pg_metrics = compute_self_distillation_loss(
+                                old_log_prob=old_log_prob,
+                                log_prob=log_prob,
+                                advantages=advantages,
+                                response_mask=response_mask,
+                                full_log_prob=full_log_prob,
+                                teacher_log_prob=teacher_log_prob,
+                                teacher_full_log_prob=teacher_full_log_prob,
+                                self_distillation_mask=self_distillation_mask,
+                                loss_agg_mode=loss_agg_mode,
+                                config=self.config,
+                                rollout_is_weights=rollout_is_weights,
+                            )
 
                         micro_batch_metrics.update(pg_metrics)
                     else:
@@ -900,7 +920,8 @@ class DataParallelPPOActor(BasePPOActor):
                     if loss_mode != "bypass_mode" and rollout_log_prob is not None:
                         # Compute metrics using CURRENT policy π_θ vs π_rollout
                         # Tracks evolving off-policy gap as π_θ updates during mini-batch training
-                        from verl.trainer.ppo.rollout_corr_helper import compute_rollout_corr_metrics_from_logprobs
+                        from verl.trainer.ppo.rollout_corr_helper import \
+                            compute_rollout_corr_metrics_from_logprobs
 
                         rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
                             log_prob=log_prob,

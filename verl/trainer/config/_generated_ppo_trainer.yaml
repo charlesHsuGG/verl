@@ -128,6 +128,7 @@ actor_rollout_ref:
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
     self_distillation:
       _target_: verl.workers.config.SelfDistillationConfig
+      use_sdrlvr: false
       full_logit_distillation: true
       distillation_topk: 100
       distillation_add_tail: true
@@ -144,6 +145,8 @@ actor_rollout_ref:
       environment_feedback_only_without_solution: true
       is_clip: 2
       lmbda: 1.0
+      sdrlvr_clip_ratio_low: -20.0
+      sdrlvr_clip_ratio_high: 20.0
       reprompt_template: '{prompt}{solution}{feedback}
 
 
