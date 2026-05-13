@@ -22,7 +22,6 @@ import ray
 import torch
 from omegaconf import DictConfig, open_dict
 from tensordict import TensorDict
-
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool
 from verl.trainer.ppo.reward import load_reward_manager
@@ -133,7 +132,7 @@ class RewardLoopWorker:
     async def compute_score_batch(self, data: DataProto) -> list[dict]:
         tasks = []
         for i in range(len(data)):
-            tasks.append(asyncio.create_task(self.compute_score(data[i : i + 1])))
+            tasks.append(asyncio.create_task(self.compute_score(data[i: i + 1])))
         outputs = await asyncio.gather(*tasks)
         return outputs
 
@@ -222,7 +221,7 @@ class RewardLoopWorker:
         if self.reward_model_tokenizer.bos_token is not None and rm_prompt.startswith(
             self.reward_model_tokenizer.bos_token
         ):
-            rm_prompt = rm_prompt[len(self.reward_model_tokenizer.bos_token) :]
+            rm_prompt = rm_prompt[len(self.reward_model_tokenizer.bos_token):]
 
         return rm_prompt
 

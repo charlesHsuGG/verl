@@ -370,7 +370,7 @@ class DataParallelPPOActor(BasePPOActor):
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                     entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
-
+                    full_log_probs_rmpad, topk_indices_rmpad = None, None
                 else:
                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                     logits_rmpad.div_(temperature)
@@ -490,7 +490,7 @@ class DataParallelPPOActor(BasePPOActor):
                     batch=batch_size,
                     seqlen=seqlen,
                 ) if full_log_probs_rmpad is not None else None
-                full_topk_indices = pad_input(
+                topk_indices = pad_input(
                     hidden_states=topk_indices_rmpad,
                     indices=indices,
                     batch=batch_size,
@@ -512,8 +512,8 @@ class DataParallelPPOActor(BasePPOActor):
                 log_probs = log_probs.squeeze(-1)[:, -response_length - 1: -1]  # (bsz, response_length)
                 if full_log_probs is not None:
                     full_log_probs = full_log_probs[:, -response_length - 1: -1, :]
-                if full_topk_indices is not None:
-                    full_topk_indices = full_topk_indices[:, -response_length - 1: -1, :]
+                if topk_indices is not None:
+                    topk_indices = topk_indices[:, -response_length - 1: -1, :]
 
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}

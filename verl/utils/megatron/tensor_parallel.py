@@ -16,7 +16,7 @@
 Utilities for using tensor_parallel in megatron
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Tuple
 
 import torch
 import torch.distributed as dist
@@ -109,7 +109,7 @@ def get_tensor_parallel_partition_stride(param):
 class _VocabParallelTopKLogSoftmax(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, vocab_parallel_logits: torch.Tensor, topk: int, dim: int = -1) -> tuple(torch.Tensor, torch.Tensor):
+    def forward(ctx, vocab_parallel_logits: torch.Tensor, topk: int, dim: int = -1) -> Tuple[torch.Tensor, torch.Tensor]:
 
         logits_max = vocab_parallel_logits.max(dim=dim, keepdim=True).values
         dist.all_reduce(logits_max, op=dist.ReduceOp.MAX, group=mpu.get_tensor_model_parallel_group())
@@ -215,7 +215,7 @@ def vocab_parallel_log_softmax(vocab_parallel_logits: torch.Tensor) -> torch.Ten
     return _VocabParallelLogSoftmax.apply(vocab_parallel_logits)
 
 
-def vocab_parallel_topk_log_softmax(vocab_parallel_logits: torch.Tensor, topk: int) -> tuple(torch.Tensor, torch.Tensor):
+def vocab_parallel_topk_log_softmax(vocab_parallel_logits: torch.Tensor, topk: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute top-k log softmax when the logits are sharded in tp ranks
 
     Args:
