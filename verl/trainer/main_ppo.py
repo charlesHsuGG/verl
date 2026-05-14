@@ -21,7 +21,6 @@ import socket
 import hydra
 import ray
 from omegaconf import OmegaConf
-
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
@@ -82,10 +81,7 @@ def run_ppo(config, task_runner_class=None) -> None:
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
     if (
-        is_cuda_available
-        and config.global_profiler.tool == "nsys"
-        and config.global_profiler.get("steps") is not None
-        and len(config.global_profiler.get("steps", [])) > 0
+        is_cuda_available and config.global_profiler.tool == "nsys" and config.global_profiler.get("steps") is not None and len(config.global_profiler.get("steps", [])) > 0
     ):
         from verl.utils.import_utils import is_nvtx_available
 
@@ -128,8 +124,11 @@ class TaskRunner:
         use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
         self_distillation_cfg = config.actor_rollout_ref.actor.get("self_distillation", None)
         loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
-        self_distillation_needs_ref = self_distillation_cfg is not None and loss_mode == "sdpo"
-        if self_distillation_needs_ref and need_reference_policy(config):
+        self_distillation_needs_ref = self_distillation_cfg is not None and loss_mode == "sdpo" and not self_distillation_cfg.get("use_sdrlvr", False)
+        self_distillation_as_adv_in_grpo = self_distillation_cfg is not None and (
+            self_distillation_cfg.get("use_sdrlvr", False) or (self_distillation_cfg.get("lmbda", 1.0) and self_distillation_cfg.get("lmbda", 1.0) < 1.0)
+        )
+        if self_distillation_needs_ref and not self_distillation_as_adv_in_grpo and need_reference_policy(config):
             raise ValueError("SDPO cannot share the reference policy with KL regularization.")
         if self_distillation_needs_ref and use_legacy_worker_impl == "disable":
             raise ValueError("SDPO requires the legacy worker implementation to colocate the teacher.")
@@ -166,7 +165,8 @@ class TaskRunner:
             ray_worker_group_cls = RayWorkerGroup
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
-            from verl.workers.megatron_workers import AsyncActorRolloutRefWorker
+            from verl.workers.megatron_workers import \
+                AsyncActorRolloutRefWorker
 
             actor_rollout_cls = AsyncActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
@@ -290,7 +290,6 @@ class TaskRunner:
         from pprint import pprint
 
         from omegaconf import OmegaConf
-
         from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
@@ -411,7 +410,6 @@ def create_rl_sampler(data_config, dataset):
     """
     import torch
     from torch.utils.data import SequentialSampler
-
     # torch.utils.data.RandomSampler could not recover properly
     from torchdata.stateful_dataloader.sampler import RandomSampler
 
@@ -447,4 +445,4 @@ def create_rl_sampler(data_config, dataset):
 
 
 if __name__ == "__main__":
-    main()
+    main()  # pylint: disable=no-value-for-parameter
