@@ -25,29 +25,24 @@ import sglang.srt.entrypoints.engine
 import torch
 from packaging import version
 from ray.actor import ActorHandle
-from sglang.srt.entrypoints.http_server import (
-    ServerArgs,
-    _GlobalState,
-    _launch_subprocesses,
-    app,
-    set_global_state,
-)
-from sglang.srt.managers.io_struct import (
-    ContinueGenerationReqInput,
-    GenerateReqInput,
-    PauseGenerationReqInput,
-    ReleaseMemoryOccupationReqInput,
-    ResumeMemoryOccupationReqInput,
-)
+from sglang.srt.entrypoints.http_server import (ServerArgs, _GlobalState,
+                                                _launch_subprocesses, app,
+                                                set_global_state)
+from sglang.srt.managers.io_struct import (ContinueGenerationReqInput,
+                                           GenerateReqInput,
+                                           PauseGenerationReqInput,
+                                           ReleaseMemoryOccupationReqInput,
+                                           ResumeMemoryOccupationReqInput)
 from sglang.srt.managers.tokenizer_manager import ServerStatus
-
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_sglang_profiler_args
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
+from verl.workers.rollout.replica import (RolloutMode, RolloutReplica,
+                                          TokenOutput)
+from verl.workers.rollout.sglang_rollout.sglang_rollout import \
+    _set_envs_and_config
 from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
@@ -401,7 +396,8 @@ class SGLangHttpServer:
             if self.config.skip_tokenizer_init:
                 routed_experts = output.get("meta_info", {}).get("routed_experts", None)
             else:
-                from sglang.srt.layers.moe.routed_experts_capturer import extract_routed_experts_from_meta_info
+                from sglang.srt.layers.moe.routed_experts_capturer import \
+                    extract_routed_experts_from_meta_info
 
                 hf_config = self.model_config.hf_config
                 if not hasattr(hf_config, "num_hidden_layers") or not hasattr(hf_config, "num_experts_per_tok"):
@@ -490,10 +486,10 @@ class SGLangReplica(RolloutReplica):
         # create server actor in each node with node affinity and cuda visible devices
         for node_rank in range(self.nnodes):
             workers = self.workers[
-                node_rank * self.gpus_per_replica_node : (node_rank + 1) * self.gpus_per_replica_node
+                node_rank * self.gpus_per_replica_node: (node_rank + 1) * self.gpus_per_replica_node
             ]
             node_cuda_visible_devices_set = worker_cuda_visible_devices[
-                node_rank * self.gpus_per_replica_node : (node_rank + 1) * self.gpus_per_replica_node
+                node_rank * self.gpus_per_replica_node: (node_rank + 1) * self.gpus_per_replica_node
             ]
             node_cuda_visible_devices = ",".join(
                 map(

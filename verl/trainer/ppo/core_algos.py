@@ -20,6 +20,7 @@ implement PPO-like algorithms.
 
 __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 
+import warnings
 from collections import defaultdict
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -1473,7 +1474,8 @@ def compute_self_distillation_loss(
 
         per_token_loss = kl_loss.sum(-1)
     else:
-        assert self_distillation_cfg.alpha == 1.0, "Only reverse KL is supported for non-full-logit distillation"
+        if self_distillation_cfg.alpha != 1.0:
+            warnings.warn("Only reverse KL is supported for non-full-logit distillation. System ignore alpha")
         assert teacher_log_prob is not None, "SDPO requires `teacher_log_probs`."
         log_ratio = log_prob - teacher_log_prob
         per_token_loss = log_ratio.detach() * log_prob

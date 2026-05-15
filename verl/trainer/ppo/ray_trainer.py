@@ -471,14 +471,12 @@ class RayPPOTrainer:
         if generations_to_log == 0:
             return
 
-        import numpy as np
-
         # Create tuples of (input, output, score) and sort by input text
         samples = list(zip(inputs, outputs, scores, strict=True))
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
         # Use fixed random seed for deterministic shuffling
-        rng = np.random.RandomState(42)
+        rng = np.random.RandomState(42)  # pylint: disable=no-member
         rng.shuffle(samples)
 
         # Take first N samples after shuffling
@@ -508,7 +506,7 @@ class RayPPOTrainer:
         self, batch: DataProto, reward_tensor: torch.Tensor, success_reward_threshold: float
     ) -> dict[Any, list[int]]:
         """Collect successful sample indices per UID based on sequence-level reward threshold."""
-        seq_scores = reward_tensor.sum(dim=-1).detach().cpu().numpy()
+        seq_scores = reward_tensor.sum(dim=-1).detach().to(torch.float32).cpu().numpy()
         uids = batch.non_tensor_batch["uid"]
         success_by_uid: dict[Any, list[int]] = defaultdict(list)
         for idx, uid in enumerate(uids):

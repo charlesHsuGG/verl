@@ -869,8 +869,9 @@ class DataParallelPPOActor(BasePPOActor):
                                 temperature=temperature,
                                 calculate_entropy=False,
                                 compute_full_log_probs=compute_full_log_probs,
+                                top_k_log_probs=self_distillation_cfg.distillation_topk if compute_full_log_probs else None
                             )
-                        full_log_prob = data.get("full_log_probs", None)
+                        full_log_prob = outputs.get("full_log_probs", None)
                         teacher_log_prob, teacher_full_log_prob = teacher_outputs["log_probs"], teacher_outputs.get("full_log_probs", None)
                         if self_distillation_cfg.use_sdrlvr:
                             pg_loss, pg_metrics = compute_self_distillation_with_rlvr_loss(
