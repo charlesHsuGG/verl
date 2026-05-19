@@ -25,8 +25,7 @@ import sglang.srt.entrypoints.engine
 import torch
 from packaging import version
 from ray.actor import ActorHandle
-from sglang.srt.entrypoints.http_server import (ServerArgs, _GlobalState,
-                                                _launch_subprocesses, app,
+from sglang.srt.entrypoints.http_server import (ServerArgs, _GlobalState, app,
                                                 set_global_state)
 from sglang.srt.managers.io_struct import (ContinueGenerationReqInput,
                                            GenerateReqInput,
@@ -145,6 +144,12 @@ class SGLangHttpServer:
         return self._server_address, self._server_port
 
     async def launch_server(self, master_address: str = None, master_port: int = None):
+        try:
+            sglang_version = sglang.__version__
+        except Exception:
+            import importlib.metadata
+
+            sglang_version = importlib.metadata.version("sglang")
         if self.nnodes > 1:
             if self.node_rank != 0:
                 assert master_address and master_port, "non-master node should provide master address and port"
@@ -158,7 +163,7 @@ class SGLangHttpServer:
         quantization = self.config.get("quantization", None)
         if quantization is not None:
             if quantization == "fp8":
-                assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
+                assert version.parse(sglang_version) >= version.parse("0.5.5"), (
                     "sglang>=0.5.5 is required for FP8 quantization"
                 )
                 FP8_BLOCK_QUANT_KWARGS = {
@@ -232,8 +237,8 @@ class SGLangHttpServer:
         # mtp
         if self.config.mtp.enable and self.config.mtp.enable_rollout:
             # Enable weights CPU backup for sglang >= 0.5.6
-            if sglang.__version__ < "0.5.6":
-                raise ValueError(f"sglang version {sglang.__version__} is not supported for MTP rollout")
+            if sglang_version < "0.5.6":
+                raise ValueError(f"sglang version {sglang_version} is not supported for MTP rollout")
 
             args["speculative_algorithm"] = self.config.mtp.speculative_algorithm
             args["speculative_num_steps"] = self.config.mtp.speculative_num_steps
@@ -248,7 +253,18 @@ class SGLangHttpServer:
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
         server_args = ServerArgs(**args)
-        if version.parse(sglang.__version__) >= version.parse("0.5.7"):
+        if version.parse(sglang_version) >= version.parse("0.5.10"):
+            from sglang.srt.entrypoints.http_server import Engine
+
+            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
+                server_args=server_args,
+                init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
+                run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
+                run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
+            )
+        elif version.parse(sglang_version) >= version.parse("0.5.7"):
+            from sglang.srt.entrypoints.http_server import _launch_subprocesses
+
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args,
                 init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
@@ -256,6 +272,8 @@ class SGLangHttpServer:
                 run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
             )
         else:
+            from sglang.srt.entrypoints.http_server import _launch_subprocesses
+
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args
             )
