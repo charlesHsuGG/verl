@@ -762,6 +762,11 @@ class DataParallelPPOActor(BasePPOActor):
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys():
             select_keys.append("rollout_log_probs")
+        # [AJET] per-sample loss weight (episode-level loss normalization).
+        # Present only when ajet.trainer_common.loss_weight_normalization_episode_level
+        # is enabled; absent => every sample weighted equally (default behaviour).
+        if "loss_weight" in data.batch.keys():
+            select_keys.append("loss_weight")
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         has_non_empty_multi_modal_inputs = self._has_non_empty_multi_modal_inputs(
@@ -808,6 +813,12 @@ class DataParallelPPOActor(BasePPOActor):
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
+
+                    # [AJET] Episode-level loss-weight normalization.
+                    loss_weight = model_inputs.get("loss_weight", None)
+                    if loss_weight is not None:
+                        loss_weight = loss_weight.to(advantages.dtype)
+                        advantages = advantages * loss_weight
 
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode
@@ -929,8 +940,7 @@ class DataParallelPPOActor(BasePPOActor):
                             compute_rollout_corr_metrics_from_logprobs
 
                         rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
-                            log_prob=log_prob,
-                            rollout_log_prob=rollout_log_prob,
+                            log_prob=log_prob, rollout_log_prob=rollout_log_prob,
                             response_mask=response_mask,
                         )
                         micro_batch_metrics.update(rollout_corr_metrics)
@@ -948,6 +958,12 @@ class DataParallelPPOActor(BasePPOActor):
                         kld = kl_penalty(
                             logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
                         )
+                        # [AJET] apply the per-token episode-level loss weight to
+                        # the KL term as well (same weight/shape used for the
+                        # policy-gradient term above), so each episode contributes
+                        # equally to the KL loss too.
+                        if loss_weight is not None:
+                            kld = kld * loss_weight
                         kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef

@@ -263,9 +263,6 @@ self_distillation:
   # KL interpolation coefficient: 0.0=forward KL, 1.0=reverse KL, in-between=JSD
   alpha: 0.5
 
-  # To Control GRPO and SDPO loss: loss = grpo_loss + lambda * sdpo_loss
-  lmbda: 1.0
-
   # SDRLVR ratio weighting clip range; only effective when use_sdrlvr is True
   sdrlvr_clip_ratio_low: -20.0
   sdrlvr_clip_ratio_high: 20.0

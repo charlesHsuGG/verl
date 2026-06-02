@@ -141,10 +141,7 @@ class TaskRunner:
         self_distillation_cfg = config.actor_rollout_ref.actor.get("self_distillation", None)
         loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
         self_distillation_needs_ref = self_distillation_cfg is not None and loss_mode == "sdpo" and not self_distillation_cfg.get("use_sdrlvr", False)
-        self_distillation_as_adv_in_grpo = self_distillation_cfg is not None and (
-            self_distillation_cfg.get("use_sdrlvr", False) or (self_distillation_cfg.get("lmbda", 1.0) and self_distillation_cfg.get("lmbda", 1.0) < 1.0)
-        )
-        if self_distillation_needs_ref and not self_distillation_as_adv_in_grpo and need_reference_policy(config):
+        if self_distillation_needs_ref and need_reference_policy(config):
             raise ValueError("SDPO cannot share the reference policy with KL regularization.")
         if self_distillation_needs_ref and use_legacy_worker_impl == "disable":
             raise ValueError("SDPO requires the legacy worker implementation to colocate the teacher.")
@@ -198,7 +195,7 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
-        actor_role = Role.ActorRolloutRef if self_distillation_needs_ref else Role.ActorRollout
+        actor_role = Role.ActorRolloutRef if need_reference_policy(config) else Role.ActorRollout
         self.role_worker_mapping[actor_role] = ray.remote(actor_rollout_cls)
         self.mapping[actor_role] = "global_pool"
         return actor_rollout_cls, ray_worker_group_cls

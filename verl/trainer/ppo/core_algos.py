@@ -1411,7 +1411,6 @@ def compute_self_distillation_loss(
     self_distillation_cfg = getattr(config, "self_distillation", None)
     if self_distillation_cfg is None:
         raise ValueError("SDPO is enabled but self_distillation config is missing.")
-    lmbda = self_distillation_cfg.lmbda if self_distillation_cfg.lmbda is not None else 1.0
 
     loss_mask = response_mask
     if self_distillation_mask is not None:
@@ -1499,15 +1498,6 @@ def compute_self_distillation_loss(
         batch_num_tokens=loss_mask.sum().clamp(min=1.0),
     )
     metrics["self_distillation/empty_target_batch"] = loss_mask.sum().item() == 0
-
-    if lmbda < 1.0:
-        pg_loss, pg_metrics = compute_policy_loss_vanilla(
-            old_log_prob=old_log_prob, log_prob=log_prob, advantages=advantages,
-            response_mask=response_mask, loss_agg_mode=loss_agg_mode, config=config,
-            rollout_is_weights=rollout_is_weights,
-        )
-        loss = lmbda * loss + (1 - lmbda) * pg_loss
-        metrics.update(pg_metrics)
     return loss, metrics
 
 

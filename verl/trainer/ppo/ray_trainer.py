@@ -22,6 +22,7 @@ import json
 import os
 import re
 import uuid
+from ast import literal_eval
 from collections import defaultdict
 from copy import deepcopy
 from pprint import pprint
@@ -33,6 +34,7 @@ from omegaconf import OmegaConf, open_dict
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
+from transformers import PreTrainedTokenizer
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
@@ -270,7 +272,7 @@ class RayPPOTrainer:
         """
 
         # Store the tokenizer for text processing
-        self.tokenizer = tokenizer
+        self.tokenizer: PreTrainedTokenizer = tokenizer
         loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
         if loss_mode == "sdpo":
             self.tokenizer.padding_side = "left"
@@ -568,6 +570,8 @@ class RayPPOTrainer:
 
         prompt_texts: list[str] = []
         for messages in raw_prompts:
+            if isinstance(messages, str):
+                messages = literal_eval(messages)  # handle single string prompt as list of one message
             if len(messages) == 0:
                 prompt_texts.append("")
                 continue
@@ -600,7 +604,7 @@ class RayPPOTrainer:
         ]
 
         def _build_teacher_message(i: int) -> list[dict]:
-            system_messages = raw_prompts[i][:-1]
+            system_messages = (raw_prompts[i][:-1].tolist() if isinstance(raw_prompts[i], np.ndarray) else raw_prompts[i][:-1]) if len(raw_prompts[i]) > 1 else []
             has_solution = solution_strs[i] is not None
             has_feedback = feedback_list[i] is not None
             feedback_only_without_solution = self_distillation_cfg.get(

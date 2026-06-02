@@ -20,18 +20,16 @@ from types import SimpleNamespace
 from typing import Optional
 
 import torch
-from transformers.modeling_flash_attention_utils import _flash_attention_forward
+from transformers.modeling_flash_attention_utils import \
+    _flash_attention_forward
 from transformers.modeling_utils import PreTrainedModel
-
 from verl.utils.import_utils import is_trl_available
 from verl.utils.transformers_compat import is_transformers_version_in_range
-from verl.utils.ulysses import (
-    gather_heads_scatter_seq,
-    gather_seq_scatter_heads,
-    get_ulysses_sequence_parallel_group,
-    get_ulysses_sequence_parallel_world_size,
-    slice_input_tensor,
-)
+from verl.utils.ulysses import (gather_heads_scatter_seq,
+                                gather_seq_scatter_heads,
+                                get_ulysses_sequence_parallel_group,
+                                get_ulysses_sequence_parallel_world_size,
+                                slice_input_tensor)
 
 _PREFIX_GROUPER_PATCHED = False
 _PREFIX_GROUPER_SUPPORTED_ATTENTIONS = {"flash_attention_2", "flash_attention_3", "sdpa", "flex_attention", "eager"}
@@ -194,7 +192,8 @@ def patch_vlm_for_ulysses_input_slicing(model_class: type):
                         if num_visual_in_shard > 0 and num_visual_before > 0:
                             # Calculate which visual embeddings belong to this shard
                             # We need to find the offset of visual tokens in this shard
-                            from verl.utils.ulysses import get_ulysses_sequence_parallel_rank
+                            from verl.utils.ulysses import \
+                                get_ulysses_sequence_parallel_rank
 
                             rank = get_ulysses_sequence_parallel_rank()
                             seq_len = original_visual_mask.shape[1]
@@ -253,22 +252,32 @@ def patch_forward_with_backends(
     forward_with_torch_backend_function = model.__class__.forward
     forward_with_triton_backend_function = model.__class__.forward
     if model.config.model_type in ["qwen2_5_vl", "qwen2_vl"]:
-        from verl.models.transformers.qwen2_vl import forward_with_torch_backend, forward_with_triton_backend
+        from verl.models.transformers.qwen2_vl import (
+            forward_with_torch_backend, forward_with_triton_backend)
 
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
     elif model.config.model_type in ["qwen3_vl", "qwen3_vl_moe"]:
-        from verl.models.transformers.qwen3_vl import forward_with_torch_backend, forward_with_triton_backend
+        from verl.models.transformers.qwen3_vl import (
+            forward_with_torch_backend, forward_with_triton_backend)
 
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
     elif model.config.model_type == "glm4v":
-        from verl.models.transformers.glm4v import forward_with_torch_backend, forward_with_triton_backend
+        from verl.models.transformers.glm4v import (
+            forward_with_torch_backend, forward_with_triton_backend)
+
+        forward_with_torch_backend_function = forward_with_torch_backend
+        forward_with_triton_backend_function = forward_with_triton_backend
+    elif model.config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+        from verl.models.transformers.qwen3_5 import (
+            forward_with_torch_backend, forward_with_triton_backend)
 
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
     else:
-        from verl.models.transformers.dense_common import forward_with_torch_backend, forward_with_triton_backend
+        from verl.models.transformers.dense_common import (
+            forward_with_torch_backend, forward_with_triton_backend)
 
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
@@ -311,7 +320,8 @@ def apply_monkey_patch(
 
     # Apply TiledMLP monkey patch for memory-efficient MLP computation
     if use_tiled_mlp:
-        from verl.models.transformers.tiled_mlp import apply_tiled_mlp_monkey_patch
+        from verl.models.transformers.tiled_mlp import \
+            apply_tiled_mlp_monkey_patch
 
         model_type = getattr(model.config, "model_type", None)
         apply_tiled_mlp_monkey_patch(num_shards=tiled_mlp_shards, model_type=model_type)
@@ -353,25 +363,26 @@ def apply_monkey_patch(
         # Step 1: patch model to support image-text mixed data
         if is_transformers_version_in_range(min_version="4.52.0"):
             from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-                Qwen2_5_VLForConditionalGeneration,
-                Qwen2_5_VLModel,
-                Qwen2_5_VLTextModel,
-            )
+                Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLModel,
+                Qwen2_5_VLTextModel)
             from transformers.models.qwen2_vl.modeling_qwen2_vl import (
-                Qwen2VLForConditionalGeneration,
-                Qwen2VLModel,
-                Qwen2VLTextModel,
-            )
+                Qwen2VLForConditionalGeneration, Qwen2VLModel,
+                Qwen2VLTextModel)
         else:
-            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
-            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel as Qwen2_5_VLTextModel
-            from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLForConditionalGeneration
-            from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLModel as Qwen2VLTextModel
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import \
+                Qwen2_5_VLForConditionalGeneration
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import \
+                Qwen2_5_VLModel as Qwen2_5_VLTextModel
+            from transformers.models.qwen2_vl.modeling_qwen2_vl import \
+                Qwen2VLForConditionalGeneration
+            from transformers.models.qwen2_vl.modeling_qwen2_vl import \
+                Qwen2VLModel as Qwen2VLTextModel
 
             Qwen2_5_VLModel = SimpleNamespace(forward=None)
             Qwen2VLModel = SimpleNamespace(forward=None)
 
-        from verl.models.transformers.qwen2_vl import forward_with_normal_backend, qwen2_vl_base_forward
+        from verl.models.transformers.qwen2_vl import (
+            forward_with_normal_backend, qwen2_vl_base_forward)
 
         Qwen2_5_VLModel.forward = qwen2_vl_base_forward
         Qwen2VLModel.forward = qwen2_vl_base_forward
@@ -381,15 +392,17 @@ def apply_monkey_patch(
 
         # Step 2: patch attention to support ulysses parallelism
         if is_transformers_version_in_range(min_version="4.54.0"):
-            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLAttention
-            from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLAttention
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import \
+                Qwen2_5_VLAttention
+            from transformers.models.qwen2_vl.modeling_qwen2_vl import \
+                Qwen2VLAttention
         elif is_transformers_version_in_range(min_version="4.53.0"):
             raise RuntimeError("Transformers 4.53.* is bugged. Use transformers 4.54.0 or later.")
         else:
-            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-                Qwen2_5_VLFlashAttention2 as Qwen2_5_VLAttention,
-            )
-            from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLFlashAttention2 as Qwen2VLAttention
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import \
+                Qwen2_5_VLFlashAttention2 as Qwen2_5_VLAttention
+            from transformers.models.qwen2_vl.modeling_qwen2_vl import \
+                Qwen2VLFlashAttention2 as Qwen2VLAttention
 
         if use_remove_padding or ulysses_sp_size > 1:
             from verl.models.transformers.qwen2_vl import qwen2_vl_attn_forward
@@ -406,21 +419,13 @@ def apply_monkey_patch(
     elif model.config.model_type in ["qwen3_vl", "qwen3_vl_moe"]:
         # Step 1: patch model to support image-text mixed data
         from transformers.models.qwen3_vl.modeling_qwen3_vl import (
-            Qwen3VLForConditionalGeneration,
-            Qwen3VLModel,
-            Qwen3VLTextModel,
-        )
+            Qwen3VLForConditionalGeneration, Qwen3VLModel, Qwen3VLTextModel)
         from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
-            Qwen3VLMoeForConditionalGeneration,
-            Qwen3VLMoeModel,
-            Qwen3VLMoeTextModel,
-        )
-
+            Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeModel,
+            Qwen3VLMoeTextModel)
         from verl.models.transformers.qwen3_vl import (
             forward_with_normal_backend,
-            patch_qwen3_vl_moe_sparse_moe_block_forward,
-            qwen3_vl_base_forward,
-        )
+            patch_qwen3_vl_moe_sparse_moe_block_forward, qwen3_vl_base_forward)
 
         Qwen3VLModel.forward = qwen3_vl_base_forward
         Qwen3VLMoeModel.forward = qwen3_vl_base_forward
@@ -441,13 +446,10 @@ def apply_monkey_patch(
         # Step 1: patch model to support image-text mixed data
 
         from transformers.models.glm4v.modeling_glm4v import (
-            Glm4vForConditionalGeneration,
-            Glm4vModel,
-            Glm4vTextAttention,
-            Glm4vTextModel,
-        )
-
-        from verl.models.transformers.glm4v import forward_with_normal_backend, glm4v_base_forward
+            Glm4vForConditionalGeneration, Glm4vModel, Glm4vTextAttention,
+            Glm4vTextModel)
+        from verl.models.transformers.glm4v import (
+            forward_with_normal_backend, glm4v_base_forward)
 
         Glm4vModel.forward = glm4v_base_forward
         Glm4vForConditionalGeneration.forward = forward_with_normal_backend
@@ -467,7 +469,8 @@ def apply_monkey_patch(
     elif model.config.model_type == "kimi_vl":
         if use_remove_padding or ulysses_sp_size > 1:
             # TODO: Changes need to be made when transformers are adapted.
-            from verl.models.transformers.kimi_vl import _ulysses_flash_attn_forward
+            from verl.models.transformers.kimi_vl import \
+                _ulysses_flash_attn_forward
 
             module.DeepseekV3FlashAttention2.forward = _ulysses_flash_attn_forward
             print("Monkey patch FlashAttention2.forward in KimiVL")
@@ -479,6 +482,27 @@ def apply_monkey_patch(
             print("Not support fused kernels for KimiVL")
 
         return
+
+    elif model.config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+        # Step 1: patch model to support image-text mixed data
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5ForConditionalGeneration, Qwen3_5Model, Qwen3_5VisionModel)
+        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+            Qwen3_5MoeForConditionalGeneration, Qwen3_5MoeModel,
+            Qwen3_5MoeVisionModel)
+        from verl.models.transformers.qwen3_5 import (
+            fast_pos_embed_interpolate, forward_with_normal_backend,
+            qwen3_5_base_forward)
+
+        Qwen3_5Model.forward = qwen3_5_base_forward
+        Qwen3_5MoeModel.forward = qwen3_5_base_forward
+        Qwen3_5ForConditionalGeneration.forward = forward_with_normal_backend
+        Qwen3_5MoeForConditionalGeneration.forward = forward_with_normal_backend
+        print(f"Monkey patch {model.__class__.__name__} model forward")
+
+        # Step 2: patch vision model to fix fsdp2 cpu_offload bug.
+        Qwen3_5VisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
+        Qwen3_5MoeVisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
 
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models

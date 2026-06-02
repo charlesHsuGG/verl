@@ -160,7 +160,9 @@ class SGLangHttpServer:
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)
+        mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
         quantization = self.config.get("quantization", None)
+        fp8_block_quant_kwargs = {}
         if quantization is not None:
             if quantization == "fp8":
                 assert version.parse(sglang_version) >= version.parse("0.5.5"), (
@@ -193,8 +195,8 @@ class SGLangHttpServer:
             "trust_remote_code": self.model_config.trust_remote_code,
             "max_running_requests": self.config.get("max_num_seqs", None),
             "log_level": "error",
-            "mm_attention_backend": "fa3",
-            "attention_backend": attention_backend if attention_backend is not None else "fa3",
+            "mm_attention_backend": mm_attention_backend if mm_attention_backend is not None else "triton_attn",
+            "attention_backend": attention_backend if attention_backend is not None else "triton",
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "skip_server_warmup": True,
             "quantization": quantization,
@@ -263,7 +265,8 @@ class SGLangHttpServer:
                 run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
             )
         elif version.parse(sglang_version) >= version.parse("0.5.7"):
-            from sglang.srt.entrypoints.http_server import _launch_subprocesses
+            from sglang.srt.entrypoints.http_server import \
+                _launch_subprocesses  # pylint: disable=no-name-in-module
 
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args,
@@ -272,7 +275,8 @@ class SGLangHttpServer:
                 run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
             )
         else:
-            from sglang.srt.entrypoints.http_server import _launch_subprocesses
+            from sglang.srt.entrypoints.http_server import \
+                _launch_subprocesses  # pylint: disable=no-name-in-module
 
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args

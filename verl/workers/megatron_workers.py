@@ -34,48 +34,44 @@ except ImportError:
 from contextlib import nullcontext
 
 from megatron.core import parallel_state as mpu
-
 from verl import DataProto
 from verl.models.mcore import get_mcore_weight_converter
 from verl.single_controller.base import Worker
-from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
+from verl.single_controller.base.decorator import (
+    Dispatch, make_nd_compute_dataproto_dispatch_fn, register)
 from verl.utils import hf_tokenizer
-from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
+from verl.utils.checkpoint.megatron_checkpoint_manager import \
+    MegatronCheckpointManager
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import (
-    get_device_id,
-    get_device_name,
-    get_nccl_backend,
-    get_torch_device,
-    set_expandable_segments,
-)
+from verl.utils.device import (get_device_id, get_device_name,
+                               get_nccl_backend, get_torch_device,
+                               set_expandable_segments)
 from verl.utils.distributed import set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
-from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
-from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
-from verl.utils.megatron_utils import (
-    load_megatron_model_to_gpu,
-    load_megatron_optimizer,
-    offload_megatron_model_to_cpu,
-    offload_megatron_optimizer,
-    per_tensor_generator,
-    register_megatron_training_hooks,
-)
+from verl.utils.megatron.router_replay_patch import (RouterReplay,
+                                                     RouterReplayAction,
+                                                     apply_router_replay_patch)
+from verl.utils.megatron_peft_utils import (add_base_layer_suffix,
+                                            build_peft_config_for_vllm)
+from verl.utils.megatron_utils import (load_megatron_model_to_gpu,
+                                       load_megatron_optimizer,
+                                       offload_megatron_model_to_cpu,
+                                       offload_megatron_optimizer,
+                                       per_tensor_generator,
+                                       register_megatron_training_hooks)
 from verl.utils.memory_utils import aggressive_empty_cache
-from verl.utils.model import get_hf_model_path, load_mcore_dist_weights, load_megatron_gptmodel_weights
-from verl.utils.profiler import (
-    DistProfiler,
-    DistProfilerExtension,
-    GPUMemoryLogger,
-    ProfilerConfig,
-    log_gpu_memory_usage,
-    simple_timer,
-)
-from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
+from verl.utils.model import (get_hf_model_path, load_mcore_dist_weights,
+                              load_megatron_gptmodel_weights)
+from verl.utils.profiler import (DistProfiler, DistProfilerExtension,
+                                 GPUMemoryLogger, ProfilerConfig,
+                                 log_gpu_memory_usage, simple_timer)
+from verl.utils.profiler.performance import (reduce_timing,
+                                             topk_reduce_ratio_min_max)
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.torch_functional import use_original_torch_compile
-from verl.workers.actor.megatron_actor import MegatronPPOActor, McTrustRegionTeacher
+from verl.workers.actor.megatron_actor import (McTrustRegionTeacher,
+                                               MegatronPPOActor)
 from verl.workers.config import HFModelConfig, McoreCriticConfig, RolloutConfig
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.rollout import get_rollout_class
@@ -116,7 +112,6 @@ class MegatronWorker(Worker):
         enable_mtp=False,
     ):
         from transformers import AutoConfig
-
         from verl.models.mcore import hf_to_mcore_config
         from verl.utils import hf_processor
         from verl.utils.model import update_model_config
@@ -167,7 +162,8 @@ class MegatronWorker(Worker):
         if self.rank == 0:
             print(f"Model config after override: {hf_config}")
 
-        from verl.models.mcore.config_converter import mapping_string_to_attn_backend
+        from verl.models.mcore.config_converter import \
+            mapping_string_to_attn_backend
 
         # todo: remove this line after mcore adopt mbridge 0.15, now for compatibility
         override_transformer_config = mapping_string_to_attn_backend(override_transformer_config)
@@ -378,11 +374,10 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         self, model_path, optim_config, override_model_config, override_transformer_config, override_ddp_config=None
     ):
         from verl.utils.megatron.optimizer import (
-            get_megatron_optimizer,
-            get_megatron_optimizer_param_scheduler,
-            init_megatron_optim_config,
-        )
-        from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
+            get_megatron_optimizer, get_megatron_optimizer_param_scheduler,
+            init_megatron_optim_config)
+        from verl.utils.megatron_utils import (McoreModuleWrapperConfig,
+                                               make_megatron_module)
         from verl.utils.model import get_generation_config, print_model_size
 
         self._init_hf_config_and_tf_config(
@@ -655,6 +650,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                         )
                     else:
                         self.actor.teacher_module = self.ref_module
+                    logger.info(f"Initialized self distillation teacher module with regularization: {teacher_regularization}")
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
@@ -968,7 +964,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def async_calls_finalize_fn_exec(self, blocking=False):
-        from megatron.core.dist_checkpointing.strategies.base import async_calls
+        from megatron.core.dist_checkpointing.strategies.base import \
+            async_calls
 
         async_calls.maybe_finalize_async_calls(blocking=blocking)
 
@@ -1077,11 +1074,10 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
         self, model_path, optim_config, override_model_config, override_transformer_config, override_ddp_config
     ):
         from verl.utils.megatron.optimizer import (
-            get_megatron_optimizer,
-            get_megatron_optimizer_param_scheduler,
-            init_megatron_optim_config,
-        )
-        from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
+            get_megatron_optimizer, get_megatron_optimizer_param_scheduler,
+            init_megatron_optim_config)
+        from verl.utils.megatron_utils import (McoreModuleWrapperConfig,
+                                               make_megatron_module)
         from verl.utils.model import print_model_size
 
         self._init_hf_config_and_tf_config(

@@ -64,7 +64,6 @@ class SelfDistillationConfig(BaseConfig):
         remove_thinking_from_demonstration (bool): Whether to remove <think>...</think>
             tags from successful demonstrations before reprompting.
         is_clip (Optional[float]): Clip value for distillation IS ratio; None disables IS weighting.
-        lmbda (Optional[float]): GRPO lambda can control SDPO and GRPO, in SDPO paper prove it work on weaker model. None disables Calculate GRPO Loss.
         sdrlvr_ratio_low (float): Lower bound for SDRLVR ratio weighting.
         sdrlvr_ratio_high (float): Upper bound for SDRLVR ratio weighting.
         reprompt_template (str): Template for reprompting. Uses {prompt}, {solution}, {feedback} placeholders.
@@ -91,7 +90,6 @@ class SelfDistillationConfig(BaseConfig):
     dont_reprompt_on_self_success: bool = False
     remove_thinking_from_demonstration: bool = False
     is_clip: Optional[float] = None
-    lmbda: Optional[float] = None
     sdrlvr_clip_ratio_low: float = -20.0
     sdrlvr_clip_ratio_high: float = 20.0
     reprompt_template: str = "{prompt}{solution}{feedback}\n\nCorrectly solve the original question.\n"
