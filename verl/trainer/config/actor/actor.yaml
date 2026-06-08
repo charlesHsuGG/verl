@@ -85,6 +85,9 @@ loss_agg_mode: token-mean
 # If null, uses response_length. Set to a constant to ensure consistent normalization.
 loss_scale_factor: null
 
+# etra loss scale factor
+loss_extra_scale_ratio: 1.0
+
 # Entropy regularization coefficient in PPO loss
 entropy_coeff: 0
 
@@ -262,10 +265,6 @@ self_distillation:
 
   # KL interpolation coefficient: 0.0=forward KL, 1.0=reverse KL, in-between=JSD
   alpha: 0.5
-
-  # SDRLVR ratio weighting clip range; only effective when use_sdrlvr is True
-  sdrlvr_clip_ratio_low: -20.0
-  sdrlvr_clip_ratio_high: 20.0
 
   # Minimum sequence reward to be considered successful
   success_reward_threshold: 0.5

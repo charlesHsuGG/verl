@@ -24,10 +24,10 @@ from codetiming import Timer
 from omegaconf import DictConfig, open_dict
 from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
-
 from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
-from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
+from verl.single_controller.base.decorator import (
+    Dispatch, make_nd_compute_dataproto_dispatch_fn, register)
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name, set_expandable_segments
@@ -35,11 +35,13 @@ from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
-from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
+from verl.utils.profiler import (DistProfiler, DistProfilerExtension,
+                                 ProfilerConfig, log_gpu_memory_usage)
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
-from verl.workers.config import ActorConfig, HFModelConfig, MtpConfig, RolloutConfig, TrainingWorkerConfig
+from verl.workers.config import (ActorConfig, HFModelConfig, MtpConfig,
+                                 RolloutConfig, TrainingWorkerConfig)
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
@@ -512,7 +514,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 checkpoint_config=actor_config.checkpoint,
             )
 
-            assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz
+            assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz, (
+                "actor and rollout should have the same setting for dynamic_bsz."
+                f"Please check actor.use_dynamic_bsz={self.config.actor.use_dynamic_bsz} and rollout.log_prob_use_dynamic_bsz={self.config.rollout.log_prob_use_dynamic_bsz} in the config file."
+            )
 
             # assign engine configs
             actor_training_config.engine_config.use_dynamic_bsz = self.config.actor.use_dynamic_bsz

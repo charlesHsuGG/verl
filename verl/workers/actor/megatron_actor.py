@@ -816,8 +816,8 @@ class MegatronPPOActor(BasePPOActor):
                         )
                         stats.update(rollout_corr_metrics)
 
-                    stats["actor/pg_loss"] = pg_loss.detach().item()
-                    policy_loss = pg_loss
+                    stats["actor/pg_loss"] = pg_loss.detach().item() * self.config.loss_extra_scale_ratio  # [AJET] Extra scaling for loss if needed
+                    policy_loss = pg_loss * self.config.loss_extra_scale_ratio  # [AJET] Extra scaling for loss if needed
 
             if calculate_entropy:
                 entropy = output["entropy"][:, -response_length - 1: -1].contiguous()

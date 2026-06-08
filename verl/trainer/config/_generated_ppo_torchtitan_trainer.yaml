@@ -72,6 +72,7 @@ actor_rollout_ref:
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
     loss_scale_factor: null
+    loss_extra_scale_ratio: 1.0
     entropy_coeff: 0
     calculate_entropy: false
     use_kl_loss: false
@@ -135,8 +136,6 @@ actor_rollout_ref:
       include_environment_feedback: true
       environment_feedback_only_without_solution: true
       is_clip: 2
-      sdrlvr_clip_ratio_low: -20.0
-      sdrlvr_clip_ratio_high: 20.0
       reprompt_template: '{prompt}{solution}{feedback}
 
 

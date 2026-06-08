@@ -273,6 +273,15 @@ class RayPPOTrainer:
 
         # Store the tokenizer for text processing
         self.tokenizer: PreTrainedTokenizer = tokenizer
+        if config.algorithm.adv_estimator == "sdpo":
+            config.algorithm.adv_estimator = "grpo"
+            config.actor_rollout_ref.actor.policy_loss.loss_mode = 'sdpo'
+
+        if config.algorithm.adv_estimator == "sdrlvr":
+            config.algorithm.adv_estimator = "grpo"
+            config.actor_rollout_ref.actor.policy_loss.loss_mode = 'sdpo'
+            config.actor_rollout_ref.actor.self_distillation.use_sdrlvr = True
+
         loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
         if loss_mode == "sdpo":
             self.tokenizer.padding_side = "left"
@@ -604,14 +613,14 @@ class RayPPOTrainer:
         ]
 
         def _build_teacher_message(i: int) -> list[dict]:
-            system_messages = (raw_prompts[i][:-1].tolist() if isinstance(raw_prompts[i], np.ndarray) else raw_prompts[i][:-1]) if len(raw_prompts[i]) > 1 else []
+            system_messages = (literal_eval(raw_prompts[i])[:-1] if isinstance(raw_prompts[i], str) else raw_prompts[i][:-1]) if len(raw_prompts[i]) > 1 else []
             has_solution = solution_strs[i] is not None
             has_feedback = feedback_list[i] is not None
-            feedback_only_without_solution = self_distillation_cfg.get(
-                "environment_feedback_only_without_solution",
-                False,
-            )
-            use_feedback = has_feedback and (not feedback_only_without_solution or not has_solution)
+            feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
+
+            feedback_section = ""
+            if has_feedback:
+                feedback_section = self_distillation_cfg.feedback_template.format(feedback_raw=feedback_list[i])
 
             solution_section = ""
             if has_solution:
@@ -619,11 +628,11 @@ class RayPPOTrainer:
                     successful_previous_attempt=solution_strs[i]
                 )
 
-            feedback_section = ""
-            if use_feedback:
-                feedback_section = self_distillation_cfg.feedback_template.format(feedback_raw=feedback_list[i])
+            if feedback_only_without_solution:
+                # If feedback_only_without_solution is True, only use feedback
+                solution_section = ""
 
-            if use_feedback or has_solution:
+            if feedback_section or solution_section:
                 reprompt_text = self_distillation_cfg.reprompt_template.format(
                     prompt=prompt_texts[i],
                     solution=solution_section,

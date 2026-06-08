@@ -834,6 +834,7 @@ class DataParallelPPOActor(BasePPOActor):
                         loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
+                    loss_scale_factor *= self.config.loss_extra_scale_ratio  # [AJET] Extra scaling for loss if needed
 
                     # all return: (bsz, response_length)
                     compute_full_log_probs = False

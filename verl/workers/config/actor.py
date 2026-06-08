@@ -90,8 +90,6 @@ class SelfDistillationConfig(BaseConfig):
     dont_reprompt_on_self_success: bool = False
     remove_thinking_from_demonstration: bool = False
     is_clip: Optional[float] = None
-    sdrlvr_clip_ratio_low: float = -20.0
-    sdrlvr_clip_ratio_high: float = 20.0
     reprompt_template: str = "{prompt}{solution}{feedback}\n\nCorrectly solve the original question.\n"
     solution_template: str = "\nCorrect solution:\n\n{successful_previous_attempt}\n\n"
     feedback_template: str = "\nThe following is feedback from your unsuccessful earlier attempt:\n\n{feedback_raw}\n\n"
@@ -234,6 +232,7 @@ class ActorConfig(BaseConfig):
     clip_ratio_c: float = 3.0
     loss_agg_mode: str = "token-mean"
     loss_scale_factor: Optional[int] = None
+    loss_extra_scale_ratio: float = 1.0
     entropy_coeff: float = 0
     tau_pos: float = 1.0
     tau_neg: float = 1.05

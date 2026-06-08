@@ -1363,7 +1363,11 @@ def compute_self_distillation_with_rlvr_loss(
 
     sequence_level_weights = torch.exp(torch.sign(advantages) * log_ratio)
 
-    advantages = advantages * torch.clamp(sequence_level_weights, min=self_distillation_cfg.sdrlvr_clip_ratio_low, max=self_distillation_cfg.sdrlvr_clip_ratio_high)
+    clip_ratio = config.clip_ratio  # Clipping parameter ε for standard PPO. See https://arxiv.org/abs/1707.06347.
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio
+
+    advantages = advantages * torch.clamp(sequence_level_weights, 1 - clip_ratio_low, 1 + clip_ratio_high)  # - clip(ratio, 1-cliprange, 1+cliprange) * A
 
     loss, metrics = compute_policy_loss_vanilla(
         old_log_prob=old_log_prob, log_prob=log_prob, advantages=advantages,
