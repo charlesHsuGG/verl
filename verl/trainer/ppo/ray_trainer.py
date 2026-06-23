@@ -1119,7 +1119,7 @@ class RayPPOTrainer:
             global_partition_lst = [[] for _ in range(dp_size)]
             for i in range(minibatch_num):
                 rearrange_minibatch_lst = get_seqlen_balanced_partitions(
-                    workload_lst[i * minibatch_size : (i + 1) * minibatch_size],
+                    workload_lst[i * minibatch_size: (i + 1) * minibatch_size],
                     k_partitions=dp_size,
                     equal_size=True,
                 )
