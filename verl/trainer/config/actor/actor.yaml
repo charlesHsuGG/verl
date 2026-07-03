@@ -249,10 +249,7 @@ self_distillation:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.workers.config.SelfDistillationConfig
 
-  # Distillation is enabled when policy_loss.loss_mode == "sdpo"
-
-  # Whether to use SDRLVR-style ratio weighting for distillation loss, which can stabilize training when teacher and student are significantly different. Requires `teacher_log_probs` to be returned by the model.
-  use_sdrlvr: False
+  # Distillation is enabled when policy_loss.loss_mode in ["sdpo", "srpo", "sdrlvr"]
 
   # Whether to use full-logit KL distillation
   full_logit_distillation: False

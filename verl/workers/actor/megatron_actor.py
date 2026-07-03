@@ -38,9 +38,8 @@ from megatron.core.transformer.module import MegatronModule
 from omegaconf import OmegaConf
 from torch import nn
 from verl import DataProto
-from verl.trainer.ppo.core_algos import (
-    agg_loss, compute_self_distillation_loss,
-    compute_self_distillation_with_rlvr_loss, get_policy_loss_fn, kl_penalty)
+from verl.trainer.ppo.core_algos import (agg_loss, get_policy_loss_fn,
+                                         kl_penalty)
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import (RouterReplay,
@@ -747,7 +746,8 @@ class MegatronPPOActor(BasePPOActor):
                 # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                 rollout_is_weights = data.get("rollout_is_weights", None)
 
-                if loss_mode == "sdpo":
+                loss_fn_kwargs = {}
+                if loss_mode in ["sdpo", "srpo", "sdrlvr"]:
                     assert "teacher_log_probs" in data, "SDPO must have `teacher_log_probs` in field."
                     full_log_prob = data.get("full_log_probs", None)
                     teacher_log_prob, teacher_full_log_prob = data["teacher_log_probs"], data.get("teacher_full_log_probs", None)
@@ -756,68 +756,45 @@ class MegatronPPOActor(BasePPOActor):
                     if teacher_log_prob is not None and output.get("topk_indices", None) is not None:
                         teacher_full_log_prob = torch.gather(teacher_log_prob, dim=-1, index=output["topk_indices"])
 
-                    if self.config.self_distillation.use_sdrlvr:
-                        pg_loss, pg_metrics = compute_self_distillation_with_rlvr_loss(
-                            old_log_prob=old_log_prob,
-                            log_prob=log_prob,
-                            advantages=advantages,
-                            response_mask=response_mask,
-                            full_log_prob=full_log_prob,
-                            teacher_log_prob=teacher_log_prob,
-                            teacher_full_log_prob=teacher_full_log_prob,
-                            self_distillation_mask=self_distillation_mask,
-                            loss_agg_mode=loss_agg_mode,
-                            config=self.config,
-                            rollout_is_weights=rollout_is_weights,
-                        )
-                    else:
-                        pg_loss, pg_metrics = compute_self_distillation_loss(
-                            old_log_prob=old_log_prob,
-                            log_prob=log_prob,
-                            advantages=advantages,
-                            response_mask=response_mask,
-                            full_log_prob=full_log_prob,
-                            teacher_log_prob=teacher_log_prob,
-                            teacher_full_log_prob=teacher_full_log_prob,
-                            self_distillation_mask=self_distillation_mask,
-                            loss_agg_mode=loss_agg_mode,
-                            config=self.config,
-                            rollout_is_weights=rollout_is_weights,
-                        )
-                    stats.update(pg_metrics)
-                    stats["actor/pg_loss"] = pg_loss.detach().item()
-                    policy_loss = pg_loss
-                else:
-                    policy_loss_fn = get_policy_loss_fn(loss_mode)
+                    loss_fn_kwargs.update({
+                        "full_log_prob": full_log_prob, "teacher_log_prob": teacher_log_prob, "teacher_full_log_prob": teacher_full_log_prob,
+                        "self_distillation_mask": self_distillation_mask
+                    })
 
-                    pg_loss, pg_metrics = policy_loss_fn(
-                        old_log_prob=old_log_prob,
+                    if loss_mode == "srpo":
+                        loss_fn_kwargs["is_correct_rollouts"] = data["is_correct_rollouts"]
+
+                policy_loss_fn = get_policy_loss_fn(loss_mode)
+
+                pg_loss, pg_metrics = policy_loss_fn(
+                    old_log_prob=old_log_prob,
+                    log_prob=log_prob,
+                    advantages=advantages,
+                    response_mask=response_mask,
+                    loss_agg_mode=loss_agg_mode,
+                    config=self.config,
+                    rollout_is_weights=rollout_is_weights,
+                    **loss_fn_kwargs
+                )
+                stats.update(pg_metrics)
+
+                # Skip if using bypass_mode loss (metrics already computed in pg_metrics)
+                rollout_log_prob = data.get("rollout_log_probs", None)
+                if loss_mode != "bypass_mode" and rollout_log_prob is not None:
+                    # Compute metrics using CURRENT policy π_θ vs π_rollout
+                    # Tracks evolving off-policy gap as π_θ updates during mini-batch training
+                    from verl.trainer.ppo.rollout_corr_helper import \
+                        compute_rollout_corr_metrics_from_logprobs  # pylint: disable=import-outside-toplevel
+
+                    rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
                         log_prob=log_prob,
-                        advantages=advantages,
+                        rollout_log_prob=rollout_log_prob,
                         response_mask=response_mask,
-                        loss_agg_mode=loss_agg_mode,
-                        config=self.config,
-                        rollout_is_weights=rollout_is_weights,
                     )
-                    stats.update(pg_metrics)
+                    stats.update(rollout_corr_metrics)
 
-                    # Skip if using bypass_mode loss (metrics already computed in pg_metrics)
-                    rollout_log_prob = data.get("rollout_log_probs", None)
-                    if loss_mode != "bypass_mode" and rollout_log_prob is not None:
-                        # Compute metrics using CURRENT policy π_θ vs π_rollout
-                        # Tracks evolving off-policy gap as π_θ updates during mini-batch training
-                        from verl.trainer.ppo.rollout_corr_helper import \
-                            compute_rollout_corr_metrics_from_logprobs  # pylint: disable=import-outside-toplevel
-
-                        rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
-                            log_prob=log_prob,
-                            rollout_log_prob=rollout_log_prob,
-                            response_mask=response_mask,
-                        )
-                        stats.update(rollout_corr_metrics)
-
-                    stats["actor/pg_loss"] = pg_loss.detach().item() * self.config.loss_extra_scale_ratio  # [AJET] Extra scaling for loss if needed
-                    policy_loss = pg_loss * self.config.loss_extra_scale_ratio  # [AJET] Extra scaling for loss if needed
+                stats["actor/pg_loss"] = pg_loss.detach().item() * self.config.loss_extra_scale_ratio  # [AJET] Extra scaling for loss if needed
+                policy_loss = pg_loss * self.config.loss_extra_scale_ratio  # [AJET] Extra scaling for loss if needed
 
             if calculate_entropy:
                 entropy = output["entropy"][:, -response_length - 1: -1].contiguous()

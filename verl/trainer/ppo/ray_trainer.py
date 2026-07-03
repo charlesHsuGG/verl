@@ -279,8 +279,11 @@ class RayPPOTrainer:
 
         if config.algorithm.adv_estimator == "sdrlvr":
             config.algorithm.adv_estimator = "grpo"
-            config.actor_rollout_ref.actor.policy_loss.loss_mode = 'sdpo'
-            config.actor_rollout_ref.actor.self_distillation.use_sdrlvr = True
+            config.actor_rollout_ref.actor.policy_loss.loss_mode = 'sdrlvr'
+
+        if config.algorithm.adv_estimator == "srpo":
+            config.algorithm.adv_estimator = "grpo"
+            config.actor_rollout_ref.actor.policy_loss.loss_mode = 'srpo'
 
         loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
         if loss_mode == "sdpo":
@@ -700,13 +703,13 @@ class RayPPOTrainer:
         metrics = {
             "self_distillation/success_group_fraction": len(
                 [uid for uid in unique_uids if len(success_by_uid[uid]) > 0]
-            )
-            / len(unique_uids),
+            ) / len(unique_uids),
             "self_distillation/success_sample_fraction": num_with_solution / batch_size,
             "self_distillation/feedback_available_fraction": num_with_feedback_available / batch_size,
             "self_distillation/feedback_used_fraction": num_with_feedback_used / batch_size,
             "self_distillation/reprompt_sample_fraction": self_distillation_mask.float().mean().item(),
         }
+
         return (
             DataProto.from_dict(
                 tensors={
@@ -714,6 +717,9 @@ class RayPPOTrainer:
                     "teacher_attention_mask": teacher_attention_mask,
                     "teacher_position_ids": teacher_position_ids,
                     "self_distillation_mask": self_distillation_mask,
+                },
+                non_tensors={
+                    "is_correct_rollouts": reward_tensor.sum(dim=-1).detach().to(torch.float32).cpu().numpy() >= self_distillation_cfg.success_reward_threshold,
                 }
             ),
             metrics,
@@ -1283,7 +1289,7 @@ class RayPPOTrainer:
         # Use group-level balancing for PrefixGrouper to keep same-uid samples together
         if getattr(self, "use_prefix_grouper", False) and "uid" in batch.non_tensor_batch:
             from verl.utils.seqlen_balancing import \
-                get_group_balanced_partitions
+                get_group_balanced_partitions  # pylint: disable=import-outside-toplevel
 
             uid_list = list(batch.non_tensor_batch["uid"])
             seqlen_list = global_seqlen_lst.tolist()
@@ -1653,7 +1659,7 @@ class RayPPOTrainer:
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
                         from verl.trainer.ppo.rollout_corr_helper import \
-                            apply_bypass_mode
+                            apply_bypass_mode  # pylint: disable=import-outside-toplevel
 
                         apply_bypass_mode(
                             batch=batch,
@@ -1690,7 +1696,7 @@ class RayPPOTrainer:
                             if "rollout_log_probs" in batch.batch.keys():
                                 # TODO: we may want to add diff of probs too.
                                 from verl.utils.debug.metrics import \
-                                    calculate_debug_metrics
+                                    calculate_debug_metrics  # pylint: disable=import-outside-toplevel
 
                                 metrics.update(calculate_debug_metrics(batch))
 
@@ -1734,7 +1740,7 @@ class RayPPOTrainer:
                             and not bypass_recomputing_logprobs  # Only in decoupled mode
                         ):
                             from verl.trainer.ppo.rollout_corr_helper import \
-                                compute_rollout_correction_and_add_to_batch
+                                compute_rollout_correction_and_add_to_batch  # pylint: disable=import-outside-toplevel
 
                             # Compute IS weights, apply rejection sampling, compute metrics
                             batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)

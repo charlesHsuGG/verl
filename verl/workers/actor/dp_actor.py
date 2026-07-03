@@ -28,9 +28,8 @@ from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.tensor import DTensor
 from verl import DataProto
-from verl.trainer.ppo.core_algos import (
-    agg_loss, compute_self_distillation_loss,
-    compute_self_distillation_with_rlvr_loss, get_policy_loss_fn, kl_penalty)
+from verl.trainer.ppo.core_algos import (agg_loss, get_policy_loss_fn,
+                                         kl_penalty)
 from verl.utils.attention_utils import (index_first_axis, pad_input, rearrange,
                                         unpad_input)
 from verl.utils.device import get_device_id, get_device_name
@@ -707,7 +706,7 @@ class DataParallelPPOActor(BasePPOActor):
         pad_token_id = data.meta_info.get("pad_token_id", 0)
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
-        self_distillation_enabled = loss_mode == "sdpo"
+        self_distillation_enabled = loss_mode in ["sdpo", "srpo", "sdrlvr"]
         self_distillation_cfg = getattr(self.config, "self_distillation", None)
         teacher_regularization = "ema"
         teacher_update_rate = 0.0
@@ -777,6 +776,8 @@ class DataParallelPPOActor(BasePPOActor):
             non_tensor_select_keys.append("multi_modal_inputs")
         if self.use_prefix_grouper and "uid" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("uid")
+        if loss_mode == "srpo":
+            non_tensor_select_keys.append("is_correct_rollout")
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
@@ -866,6 +867,7 @@ class DataParallelPPOActor(BasePPOActor):
                     # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                     rollout_is_weights = model_inputs.get("rollout_is_weights", None)
 
+                    loss_fn_kwargs = {}
                     if self_distillation_enabled:
                         teacher_inputs = {
                             "responses": model_inputs["responses"],
@@ -885,52 +887,29 @@ class DataParallelPPOActor(BasePPOActor):
                             )
                         full_log_prob = outputs.get("full_log_probs", None)
                         teacher_log_prob, teacher_full_log_prob = teacher_outputs["log_probs"], teacher_outputs.get("full_log_probs", None)
-                        if self_distillation_cfg.use_sdrlvr:
-                            pg_loss, pg_metrics = compute_self_distillation_with_rlvr_loss(
-                                old_log_prob=old_log_prob,
-                                log_prob=log_prob,
-                                advantages=advantages,
-                                response_mask=response_mask,
-                                full_log_prob=full_log_prob,
-                                teacher_log_prob=teacher_log_prob,
-                                teacher_full_log_prob=teacher_full_log_prob,
-                                self_distillation_mask=self_distillation_mask,
-                                loss_agg_mode=loss_agg_mode,
-                                config=self.config,
-                                rollout_is_weights=rollout_is_weights,
-                            )
-                        else:
-                            pg_loss, pg_metrics = compute_self_distillation_loss(
-                                old_log_prob=old_log_prob,
-                                log_prob=log_prob,
-                                advantages=advantages,
-                                response_mask=response_mask,
-                                full_log_prob=full_log_prob,
-                                teacher_log_prob=teacher_log_prob,
-                                teacher_full_log_prob=teacher_full_log_prob,
-                                self_distillation_mask=self_distillation_mask,
-                                loss_agg_mode=loss_agg_mode,
-                                config=self.config,
-                                rollout_is_weights=rollout_is_weights,
-                            )
+                        loss_fn_kwargs.update({
+                            "full_log_prob": full_log_prob, "teacher_log_prob": teacher_log_prob, "teacher_full_log_prob": teacher_full_log_prob,
+                            "self_distillation_mask": self_distillation_mask
+                        })
+                        if loss_mode == "srpo":
+                            loss_fn_kwargs["is_correct_rollouts"] = model_inputs["is_correct_rollouts"]
 
-                        micro_batch_metrics.update(pg_metrics)
-                    else:
-                        # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
-                        # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
-                        policy_loss_fn = get_policy_loss_fn(loss_mode)
+                    # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
+                    # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
+                    policy_loss_fn = get_policy_loss_fn(loss_mode)
 
-                        # Compute policy loss (any function is expected to return 2 values)
-                        pg_loss, pg_metrics = policy_loss_fn(
-                            old_log_prob=old_log_prob,
-                            log_prob=log_prob,
-                            advantages=advantages,
-                            response_mask=response_mask,
-                            loss_agg_mode=loss_agg_mode,
-                            config=self.config,
-                            rollout_is_weights=rollout_is_weights,
-                        )
-                        micro_batch_metrics.update(pg_metrics)
+                    # Compute policy loss (any function is expected to return 2 values)
+                    pg_loss, pg_metrics = policy_loss_fn(
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        loss_agg_mode=loss_agg_mode,
+                        config=self.config,
+                        rollout_is_weights=rollout_is_weights,
+                        **loss_fn_kwargs
+                    )
+                    micro_batch_metrics.update(pg_metrics)
 
                     # Skip if using bypass_mode loss (metrics already computed in pg_metrics)
                     rollout_log_prob = model_inputs.get("rollout_log_probs", None)
@@ -938,7 +917,9 @@ class DataParallelPPOActor(BasePPOActor):
                         # Compute metrics using CURRENT policy π_θ vs π_rollout
                         # Tracks evolving off-policy gap as π_θ updates during mini-batch training
                         from verl.trainer.ppo.rollout_corr_helper import \
-                            compute_rollout_corr_metrics_from_logprobs
+                            compute_rollout_corr_metrics_from_logprobs  # pylint: disable=import-outside-toplevel
+
+                        # Compute metrics using CURRENT policy π_θ vs π_rollout
 
                         rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
                             log_prob=log_prob, rollout_log_prob=rollout_log_prob,

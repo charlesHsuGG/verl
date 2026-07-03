@@ -44,8 +44,7 @@ class SelfDistillationConfig(BaseConfig):
     """Configuration for self-distillation loss.
 
     Args:
-        Distillation is enabled when policy_loss.loss_mode == "sdpo".
-        use_sdrlvr (bool): Whether to use SDRLVR-style ratio weighting for distillation loss.
+        Distillation is enabled when policy_loss.loss_mode in ["sdpo", "srpo", "sdrlvr"].
         full_logit_distillation (bool): Whether to use full-logit KL distillation.
         alpha (float): KL interpolation coefficient.
             0.0=forward KL, 1.0=reverse KL, in-between=JSD.
@@ -76,7 +75,7 @@ class SelfDistillationConfig(BaseConfig):
             when no solution is available (ignore feedback when solution exists).
     """
 
-    use_sdrlvr: bool = False
+    use_srpo: bool = False
     full_logit_distillation: bool = False
     alpha: float = 0.0
     success_reward_threshold: float = 1.0
