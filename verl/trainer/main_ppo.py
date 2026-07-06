@@ -139,7 +139,8 @@ class TaskRunner:
 
         use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
         self_distillation_cfg = config.actor_rollout_ref.actor.get("self_distillation", None)
-        enable_self_distillation = self_distillation_cfg is not None
+        loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
+        enable_self_distillation = self_distillation_cfg is not None and loss_mode in ["sdpo", "srpo", "sdrlvr"]
         if enable_self_distillation and need_reference_policy(config):
             raise ValueError("SDPO cannot share the reference policy with KL regularization.")
         if enable_self_distillation and use_legacy_worker_impl == "disable":
