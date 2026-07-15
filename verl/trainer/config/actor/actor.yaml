@@ -88,6 +88,9 @@ loss_scale_factor: null
 # etra loss scale factor
 loss_extra_scale_ratio: 1.0
 
+# override total numver of ppo mini batch
+override_ppo_mini_batch_num: -1
+
 # Entropy regularization coefficient in PPO loss
 entropy_coeff: 0
 

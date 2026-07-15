@@ -21,6 +21,7 @@ Note that our model doesn't have to be `MegatronModule` because we don't share e
 
 import itertools
 import logging
+import math
 import os
 from functools import partial
 from typing import Iterable, Optional
@@ -612,8 +613,16 @@ class MegatronPPOActor(BasePPOActor):
         else:
             data = data.select(batch_keys=select_keys)
 
+        # Split to make minibatch iterator for updating the actor
+        # See PPO paper for details. https://arxiv.org/abs/1707.06347
+        # [AJET] Support override_ppo_mini_batch_num to control the number of optimizer steps
+        if self.config.override_ppo_mini_batch_num > 0:
+            mini_batch_split_size = math.ceil(data.batch.batch_size[0] / self.config.override_ppo_mini_batch_num)
+        else:
+            mini_batch_split_size = self.config.ppo_mini_batch_size
+
         return data.make_iterator(
-            mini_batch_size=self.config.ppo_mini_batch_size,
+            mini_batch_size=mini_batch_split_size,
             epochs=self.config.ppo_epochs,
             seed=self.config.data_loader_seed,
             dataloader_kwargs={"shuffle": self.config.shuffle},
@@ -1085,6 +1094,14 @@ class MegatronPPOActor(BasePPOActor):
             if self.config.use_dynamic_bsz:
                 max_token_len = self.config.ppo_max_token_len_per_gpu * self.config.megatron.context_parallel_size
 
+            # Split to make minibatch iterator for updating the actor
+            # See PPO paper for details. https://arxiv.org/abs/1707.06347
+            # [AJET] Support override_ppo_mini_batch_num to control the number of optimizer steps
+            if self.config.override_ppo_mini_batch_num > 0:
+                mini_batch_split_size = math.ceil(data.batch.batch_size[0] / self.config.override_ppo_mini_batch_num)
+            else:
+                mini_batch_split_size = self.config.ppo_mini_batch_size
+
             if self_distillation_enabled:
 
                 select_keys = ["responses", "teacher_input_ids", "teacher_attention_mask", "teacher_position_ids"]
@@ -1118,7 +1135,7 @@ class MegatronPPOActor(BasePPOActor):
                     use_dynamic_bsz=self.config.use_dynamic_bsz,
                     micro_batch_size=micro_batch_size,
                     max_token_len=max_token_len,
-                    mini_batch_size=self.config.ppo_mini_batch_size,
+                    mini_batch_size=mini_batch_split_size,
                     compute_full_log_probs=compute_full_log_probs
                 )
             else:
@@ -1128,7 +1145,7 @@ class MegatronPPOActor(BasePPOActor):
                     use_dynamic_bsz=self.config.use_dynamic_bsz,
                     micro_batch_size=micro_batch_size,
                     max_token_len=max_token_len,
-                    mini_batch_size=self.config.ppo_mini_batch_size,
+                    mini_batch_size=mini_batch_split_size,
                 )
 
             mtp_losses = metric_micro_batch.get("mtp_losses", None)

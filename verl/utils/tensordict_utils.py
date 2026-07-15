@@ -332,14 +332,14 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
             offsets = nt.offsets()
             lengths = offsets.diff().tolist()
             for i, chunk_td in enumerate(tds):
-                chunk_lengths = lengths[i * chunk_size : (i + 1) * chunk_size]
+                chunk_lengths = lengths[i * chunk_size: (i + 1) * chunk_size]
                 chunk_tensors = [padded_chunks[i][j, :seq_len] for j, seq_len in enumerate(chunk_lengths)]
                 chunk_td[key] = torch.nested.as_nested_tensor(chunk_tensors, layout=torch.jagged)
             continue
 
         for i, chunk_td in enumerate(tds):
             chunk_td[key] = torch.nested.as_nested_tensor(
-                tensors[i * chunk_size : (i + 1) * chunk_size], layout=torch.jagged
+                tensors[i * chunk_size: (i + 1) * chunk_size], layout=torch.jagged
             )
 
     return tds
@@ -553,18 +553,18 @@ def make_iterator(tensordict: TensorDict, mini_batch_size, epochs, seed=None, da
     """
     from torch.utils.data import DataLoader
 
-    # assert tensordict.batch_size[0] % mini_batch_size == 0, f"{tensordict.batch_size[0]} % {mini_batch_size} != 0"
-    assert tensordict.batch_size[0] >= mini_batch_size, f"mini_batch_size {mini_batch_size} cannot be larger than the batch size {tensordict.batch_size[0]}"
+    assert tensordict.batch_size[0] % mini_batch_size == 0, f"{tensordict.batch_size[0]} % {mini_batch_size} != 0"
+    # assert tensordict.batch_size[0] >= mini_batch_size, f"mini_batch_size {mini_batch_size} cannot be larger than the batch size {tensordict.batch_size[0]}"
 
     # we can directly create a dataloader from TensorDict
     if dataloader_kwargs is None:
         dataloader_kwargs = {}
 
-    # drop_last is set to True to ensure that all mini-batches have the same size, which is important for distributed training.
-    # If the batch size is not divisible by mini_batch_size, the last few samples will be dropped in each epoch.
-    if tensordict.batch_size[0] % mini_batch_size != 0:
-        dataloader_kwargs["drop_last"] = True
-        dataloader_kwargs["shuffle"] = True
+    # # drop_last is set to True to ensure that all mini-batches have the same size, which is important for distributed training.
+    # # If the batch size is not divisible by mini_batch_size, the last few samples will be dropped in each epoch.
+    # if tensordict.batch_size[0] % mini_batch_size != 0:
+    #     dataloader_kwargs["drop_last"] = True
+    #     dataloader_kwargs["shuffle"] = True
 
     if seed is not None:
         generator = torch.Generator()

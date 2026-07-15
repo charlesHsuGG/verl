@@ -231,7 +231,6 @@ class ActorConfig(BaseConfig):
     clip_ratio_c: float = 3.0
     loss_agg_mode: str = "token-mean"
     loss_scale_factor: Optional[int] = None
-    loss_extra_scale_ratio: float = 1.0
     entropy_coeff: float = 0
     tau_pos: float = 1.0
     tau_neg: float = 1.05
@@ -254,6 +253,9 @@ class ActorConfig(BaseConfig):
     model_config: HFModelConfig = field(default_factory=BaseConfig)
     self_distillation: SelfDistillationConfig = field(default_factory=SelfDistillationConfig)
     router_replay: RouterReplayConfig = field(default_factory=RouterReplayConfig)
+
+    override_ppo_mini_batch_num: int = -1
+    loss_extra_scale_ratio: float = 1.0
 
     # Store global batch info for loss aggregation:
     # dp_size: data parallel size

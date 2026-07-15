@@ -34,7 +34,6 @@ from packaging import version
 from packaging.version import parse as parse_version
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
-
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.py_functional import (list_of_dict_to_dict_of_list,
                                       union_two_dict)
@@ -813,17 +812,17 @@ class DataProto:
             Iterator: an iterator that yields a mini-batch data at a time. The total number of iteration
                 steps is ``self.batch.batch_size * epochs // mini_batch_size``
         """
-        # assert self.batch.batch_size[0] % mini_batch_size == 0, f"{self.batch.batch_size[0]} % {mini_batch_size} != 0"
-        assert self.batch.batch_size[0] >= mini_batch_size, f"mini_batch_size {mini_batch_size} cannot be larger than the batch size {self.batch.batch_size[0]}"
+        assert self.batch.batch_size[0] % mini_batch_size == 0, f"{self.batch.batch_size[0]} % {mini_batch_size} != 0"
+        # assert self.batch.batch_size[0] >= mini_batch_size, f"mini_batch_size {mini_batch_size} cannot be larger than the batch size {self.batch.batch_size[0]}"
         # we can directly create a dataloader from TensorDict
         if dataloader_kwargs is None:
             dataloader_kwargs = {}
 
-        # drop_last is set to True to ensure that all mini-batches have the same size, which is important for distributed training.
-        # If the batch size is not divisible by mini_batch_size, the last few samples will be dropped in each epoch.
-        if self.batch.batch_size[0] % mini_batch_size != 0:
-            dataloader_kwargs["drop_last"] = True
-            dataloader_kwargs["shuffle"] = True
+        # # drop_last is set to True to ensure that all mini-batches have the same size, which is important for distributed training.
+        # # If the batch size is not divisible by mini_batch_size, the last few samples will be dropped in each epoch.
+        # if self.batch.batch_size[0] % mini_batch_size != 0:
+        #     dataloader_kwargs["drop_last"] = True
+        #     dataloader_kwargs["shuffle"] = True
 
         if seed is not None:
             generator = torch.Generator()
@@ -894,7 +893,7 @@ class DataProto:
         for key, val in self.non_tensor_batch.items():
             assert isinstance(val, np.ndarray)
             if bsz_in_batch is not None:
-                non_tensor_lst = np.array_split(val, chunk_indices.tolist())
+                non_tensor_lst = np.array_split(val, chunk_indices.tolist())  # pylint: disable=possibly-used-before-assignment
             else:
                 non_tensor_lst = np.array_split(val, chunks)
             assert len(non_tensor_lst) == chunks
@@ -918,7 +917,7 @@ class DataProto:
         Returns:
             List[DataProto]: a list of DataProto after splitting
         """
-        return [self[i : i + split_size] for i in range(0, len(self), split_size)]
+        return [self[i: i + split_size] for i in range(0, len(self), split_size)]
 
     @staticmethod
     def concat(data: list["DataProto"]) -> "DataProto":
@@ -1119,7 +1118,6 @@ class DataProto:
         non_tensor_batch = self.non_tensor_batch
 
         from tensordict.tensorclass import NonTensorData, NonTensorStack
-
         from verl.utils import tensordict_utils as tu
 
         common_keys = set(tensor_batch.keys()) & set(non_tensor_batch.keys())

@@ -18,6 +18,7 @@ Single Process Actor
 """
 
 import logging
+import math
 import os
 from types import SimpleNamespace
 from typing import Optional
@@ -783,7 +784,15 @@ class DataParallelPPOActor(BasePPOActor):
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
-        mini_batches = data.split(self.config.ppo_mini_batch_size)
+        # [AJET] Support override_ppo_mini_batch_num to control the number of optimizer steps
+        if self.config.override_ppo_mini_batch_num > 0:
+            mini_batch_split_size = math.ceil(data.batch.batch_size[0] / self.config.override_ppo_mini_batch_num)
+        else:
+            mini_batch_split_size = self.config.ppo_mini_batch_size
+
+        # Split to make minibatch iterator for updating the actor
+        # See PPO paper for details. https://arxiv.org/abs/1707.06347
+        mini_batches = data.split(mini_batch_split_size)
 
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
 
@@ -801,7 +810,7 @@ class DataParallelPPOActor(BasePPOActor):
                     )
                 else:
                     self.gradient_accumulation = (
-                        self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                        mini_batch_split_size // self.config.ppo_micro_batch_size_per_gpu
                     )
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
@@ -831,8 +840,10 @@ class DataParallelPPOActor(BasePPOActor):
                     if self_distillation_enabled and has_non_empty_multi_modal_inputs:
                         raise ValueError("SDPO does not support multi-modal inputs in actor.update_policy.")
 
-                    if self.config.use_dynamic_bsz:
-                        loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
+                    if self.config.override_ppo_mini_batch_num > 0:
+                        loss_scale_factor = response_mask.shape[0] / mini_batch_split_size
+                    elif self.config.use_dynamic_bsz:
+                        loss_scale_factor = response_mask.shape[0] / mini_batch_split_size
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
                     loss_scale_factor *= self.config.loss_extra_scale_ratio  # [AJET] Extra scaling for loss if needed
@@ -920,7 +931,6 @@ class DataParallelPPOActor(BasePPOActor):
                             compute_rollout_corr_metrics_from_logprobs  # pylint: disable=import-outside-toplevel
 
                         # Compute metrics using CURRENT policy π_θ vs π_rollout
-
                         rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
                             log_prob=log_prob, rollout_log_prob=rollout_log_prob,
                             response_mask=response_mask,
@@ -936,6 +946,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                     if self.config.use_kl_loss:
                         ref_log_prob = model_inputs["ref_log_prob"]
+
                         # compute kl loss
                         kld = kl_penalty(
                             logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
