@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import torch
 from prefix_grouper import PrefixGrouper
-
 from verl.utils.torch_functional import logprobs_from_logits
 
 
@@ -35,7 +34,7 @@ def build_position_ids_for_prefix_grouper(prefix_grouper: PrefixGrouper) -> torc
         cur_pos = prefix_len
         for suffix_len in group.suffix_lens:
             if suffix_len > 0:
-                position_ids[i, cur_pos : cur_pos + suffix_len] = torch.arange(
+                position_ids[i, cur_pos: cur_pos + suffix_len] = torch.arange(
                     prefix_len, prefix_len + suffix_len, device=device
                 )
                 cur_pos += suffix_len

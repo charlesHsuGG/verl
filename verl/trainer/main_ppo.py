@@ -24,6 +24,7 @@ from omegaconf import OmegaConf
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.ppo.core_algos import SUPPORT_SELF_DISTILL_LOSS_MODE
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
@@ -140,7 +141,7 @@ class TaskRunner:
         use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
         self_distillation_cfg = config.actor_rollout_ref.actor.get("self_distillation", None)
         loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
-        enable_self_distillation = self_distillation_cfg is not None and loss_mode in ["sdpo", "srpo", "sdrlvr"]
+        enable_self_distillation = self_distillation_cfg is not None and loss_mode in SUPPORT_SELF_DISTILL_LOSS_MODE
         if enable_self_distillation and need_reference_policy(config):
             raise ValueError("SDPO cannot share the reference policy with KL regularization.")
         if enable_self_distillation and use_legacy_worker_impl == "disable":
@@ -172,21 +173,21 @@ class TaskRunner:
         # Note: sync mode validation is now handled in RolloutConfig.__post_init__
         # Always use async worker since sync mode is deprecated and rejected
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
+            from verl.workers.fsdp_workers import \
+                AsyncActorRolloutRefWorker  # pylint: disable=import-outside-toplevel
 
             actor_rollout_cls = AsyncActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
             from verl.workers.megatron_workers import \
-                AsyncActorRolloutRefWorker
+                AsyncActorRolloutRefWorker  # pylint: disable=import-outside-toplevel
 
             actor_rollout_cls = AsyncActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
         elif (
-            config.actor_rollout_ref.actor.strategy == "veomni"
-            or config.actor_rollout_ref.actor.strategy == "torchtitan"
+            config.actor_rollout_ref.actor.strategy == "veomni" or config.actor_rollout_ref.actor.strategy == "torchtitan"
         ):
             raise NotImplementedError(
                 f"{config.actor_rollout_ref.actor.strategy} does not support legacy worker implementation"
@@ -195,7 +196,7 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
-        actor_role = Role.ActorRolloutRef if need_reference_policy(config) else Role.ActorRollout
+        actor_role = Role.ActorRolloutRef if enable_self_distillation or need_reference_policy(config) else Role.ActorRollout
         self.role_worker_mapping[actor_role] = ray.remote(actor_rollout_cls)
         self.mapping[actor_role] = "global_pool"
         return actor_rollout_cls, ray_worker_group_cls
@@ -205,10 +206,12 @@ class TaskRunner:
         use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
         if config.critic.strategy in {"fsdp", "fsdp2"}:
             if use_legacy_worker_impl in ["auto", "enable"]:
-                from verl.workers.fsdp_workers import CriticWorker
+                from verl.workers.fsdp_workers import \
+                    CriticWorker  # pylint: disable=import-outside-toplevel
             elif use_legacy_worker_impl == "disable":
                 # we don't need to specialize critic worker. Just use TrainingWorker
-                from verl.workers.engine_workers import TrainingWorker
+                from verl.workers.engine_workers import \
+                    TrainingWorker  # pylint: disable=import-outside-toplevel
 
                 CriticWorker = TrainingWorker
                 print("Using new worker implementation")
@@ -221,7 +224,8 @@ class TaskRunner:
 
         elif config.critic.strategy == "veomni" or config.critic.strategy == "torchtitan":
             if use_legacy_worker_impl == "disable":
-                from verl.workers.engine_workers import TrainingWorker
+                from verl.workers.engine_workers import \
+                    TrainingWorker  # pylint: disable=import-outside-toplevel
 
                 CriticWorker = TrainingWorker
                 print(f"Using new worker implementation for {config.critic.strategy}")
@@ -233,7 +237,8 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
-        from verl.trainer.ppo.ray_trainer import Role
+        from verl.trainer.ppo.ray_trainer import \
+            Role  # pylint: disable=import-outside-toplevel
 
         self.role_worker_mapping[Role.Critic] = ray.remote(CriticWorker)
         self.mapping[Role.Critic] = "global_pool"
@@ -258,14 +263,16 @@ class TaskRunner:
             config.reward.reward_model.nnodes = config.trainer.nnodes
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
-        from verl.trainer.ppo.ray_trainer import ResourcePoolManager
+        from verl.trainer.ppo.ray_trainer import \
+            ResourcePoolManager  # pylint: disable=import-outside-toplevel
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
         return resource_pool_manager
 
     def add_reward_model_resource_pool(self, config):
         """Add reward model worker if enabled."""
-        from verl.trainer.ppo.ray_trainer import Role
+        from verl.trainer.ppo.ray_trainer import \
+            Role  # pylint: disable=import-outside-toplevel
 
         if config.reward.reward_model.enable:
             # we do not use reward model workers, so we only register reward model in resource pool
@@ -300,10 +307,12 @@ class TaskRunner:
                    for setting up and running the PPO training process.
         """
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
-        from pprint import pprint
+        from pprint import pprint  # pylint: disable=import-outside-toplevel
 
-        from omegaconf import OmegaConf
-        from verl.utils.fs import copy_to_local
+        from omegaconf import \
+            OmegaConf  # pylint: disable=import-outside-toplevel
+        from verl.utils.fs import \
+            copy_to_local  # pylint: disable=import-outside-toplevel
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))
@@ -331,7 +340,8 @@ class TaskRunner:
         )
 
         # Instantiate the tokenizer and processor.
-        from verl.utils import hf_processor, hf_tokenizer
+        from verl.utils import (  # pylint: disable=import-outside-toplevel
+            hf_processor, hf_tokenizer)
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
@@ -340,7 +350,8 @@ class TaskRunner:
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
 
-        from verl.utils.dataset.rl_dataset import collate_fn
+        from verl.utils.dataset.rl_dataset import \
+            collate_fn  # pylint: disable=import-outside-toplevel
 
         # Create training and validation datasets.
         train_dataset = create_rl_dataset(
@@ -394,7 +405,8 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
         dataset (Dataset): The dataset.
     """
 
-    from verl.utils.dataset.rl_dataset import get_dataset_class
+    from verl.utils.dataset.rl_dataset import \
+        get_dataset_class  # pylint: disable=import-outside-toplevel
 
     # Get the dataset class
     dataset_cls = get_dataset_class(data_config)
@@ -421,10 +433,12 @@ def create_rl_sampler(data_config, dataset):
     Returns:
         sampler (Sampler): The sampler.
     """
-    import torch
-    from torch.utils.data import SequentialSampler
+    import torch  # pylint: disable=import-outside-toplevel
+    from torch.utils.data import \
+        SequentialSampler  # pylint: disable=import-outside-toplevel
     # torch.utils.data.RandomSampler could not recover properly
-    from torchdata.stateful_dataloader.sampler import RandomSampler
+    from torchdata.stateful_dataloader.sampler import \
+        RandomSampler  # pylint: disable=import-outside-toplevel
 
     if data_config.sampler is not None and data_config.sampler.get("class_path", None) is not None:
         curriculum_class = load_extern_object(

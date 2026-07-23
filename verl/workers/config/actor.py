@@ -157,6 +157,7 @@ class PolicyLossConfig(BaseConfig):
         kl_cov_ratio (float): Ratio of tokens to be applied KL penalty for kl-cov loss.
         ppo_kl_coef (float): KL divergence penalty coefficient.
         rollout_correction (RolloutCorrectionConfig): Configuration for rollout correction.
+        is_on_policy (bool): on policy RL training to forbbiden kl calculation.
     """
 
     loss_mode: str = "vanilla"
@@ -166,6 +167,8 @@ class PolicyLossConfig(BaseConfig):
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
+
+    is_on_policy: bool = False
 
 
 @dataclass

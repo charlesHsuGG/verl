@@ -33,7 +33,8 @@ from peft import LoraConfig, TaskType, get_peft_model
 from safetensors.torch import save_file
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
+from torch.distributed.fsdp.api import (FullStateDictConfig,
+                                        ShardedStateDictConfig, StateDictType)
 
 try:
     # for torch 2.5+
@@ -44,53 +45,48 @@ except ImportError:
 from verl import DataProto
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.single_controller.base import Worker
-from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
+from verl.single_controller.base.decorator import (
+    Dispatch, make_nd_compute_dataproto_dispatch_fn, register)
+from verl.trainer.ppo.core_algos import SUPPORT_SELF_DISTILL_LOSS_MODE
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import (
-    get_device_id,
-    get_device_name,
-    get_nccl_backend,
-    get_torch_device,
-    set_expandable_segments,
-)
+from verl.utils.device import (get_device_id, get_device_name,
+                               get_nccl_backend, get_torch_device,
+                               set_expandable_segments)
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
-from verl.utils.fsdp_utils import (
-    CPUOffloadPolicy,
-    MixedPrecisionPolicy,
-    apply_fsdp2,
-    collect_lora_params,
-    fsdp2_load_full_state_dict,
-    fsdp_version,
-    get_fsdp_wrap_policy,
-    get_init_weight_context_manager,
-    get_shard_placement_fn,
-    init_fn,
-    layered_summon_lora_params,
-    load_fsdp_model_to_gpu,
-    load_fsdp_optimizer,
-    offload_fsdp_model_to_cpu,
-    offload_fsdp_optimizer,
-    replace_lora_wrapper,
-)
+from verl.utils.fsdp_utils import (CPUOffloadPolicy, MixedPrecisionPolicy,
+                                   apply_fsdp2, collect_lora_params,
+                                   fsdp2_load_full_state_dict, fsdp_version,
+                                   get_fsdp_wrap_policy,
+                                   get_init_weight_context_manager,
+                                   get_shard_placement_fn, init_fn,
+                                   layered_summon_lora_params,
+                                   load_fsdp_model_to_gpu, load_fsdp_optimizer,
+                                   offload_fsdp_model_to_cpu,
+                                   offload_fsdp_optimizer,
+                                   replace_lora_wrapper)
 from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import convert_weight_keys
-from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage, simple_timer
-from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
+from verl.utils.profiler import (DistProfiler, DistProfilerExtension,
+                                 ProfilerConfig, log_gpu_memory_usage,
+                                 simple_timer)
+from verl.utils.profiler.performance import (reduce_timing,
+                                             topk_reduce_ratio_min_max)
 from verl.utils.py_functional import convert_to_regular_types
-
 # QAT support
 from verl.utils.qat import apply_qat, enable_qat_fuse
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
-from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
+from verl.workers.config import (FSDPCriticConfig, FSDPEngineConfig,
+                                 HFModelConfig, RolloutConfig)
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.rollout import get_rollout_class
-from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
+from verl.workers.sharding_manager.fsdp_ulysses import \
+    FSDPUlyssesShardingManager
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -344,11 +340,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         tiled_mlp_shards=4,
     ):
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
-        from transformers import (
-            AutoConfig,
-            AutoModel,
-            AutoModelForCausalLM,
-        )
+        from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
         try:
             from transformers import AutoModelForVision2Seq
@@ -359,7 +351,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         except ImportError:
             AutoModelForImageTextToText = AutoModelForVision2Seq
 
-        from verl.utils.model import get_generation_config, print_model_size, update_model_config
+        from verl.utils.model import (get_generation_config, print_model_size,
+                                      update_model_config)
         from verl.utils.torch_dtypes import PrecisionType
 
         AutoModelForVision2Seq = get_auto_model_for_vision2seq()
@@ -476,7 +469,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
-                from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
+                from liger_kernel.transformers.monkey_patch import \
+                    _apply_liger_kernel_to_instance
 
                 _apply_liger_kernel_to_instance(model=actor_module)
 
@@ -645,7 +639,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # TODO: add more optimizer args into config
         if role == "actor" and optim_config is not None:
-            from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
+            from verl.utils.torch_functional import (
+                get_constant_schedule_with_warmup,
+                get_cosine_schedule_with_warmup)
 
             actor_optimizer = build_optimizer(actor_module_fsdp.parameters(), optim_config)
 
@@ -854,7 +850,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.base_sync_done = True
         set_expandable_segments(True)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def init_model(self):
         from verl.workers.actor import DataParallelPPOActor, TrustRegionTeacher
 
@@ -969,7 +965,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if self._is_actor:
                 self_distillation_cfg = self.config.actor.get("self_distillation", None)
                 loss_mode = self.config.actor.policy_loss.get("loss_mode", "vanilla")
-                if self_distillation_cfg is not None and loss_mode == "sdpo":
+                if self_distillation_cfg is not None and loss_mode in SUPPORT_SELF_DISTILL_LOSS_MODE:
                     teacher_regularization = self.actor.resolve_teacher_regularization(self_distillation_cfg)
                     teacher_update_rate = self.actor.resolve_teacher_update_rate(self_distillation_cfg)
                     if str(teacher_regularization).lower() in {"trust_region", "trust-region", "trustregion"}:
@@ -1081,7 +1077,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             output = self.rollout.generate_sequences(prompts=prompts)
 
         if self._is_actor:
-            loop.run_until_complete(self.trainer_mode())
+            loop.run_until_complete(self.trainer_mode())  # pylint: disable=no-member
             log_gpu_memory_usage("After switch to trainer mode", logger=logger)
 
         # We calculate the average timing across all ranks
@@ -1190,7 +1186,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         return output
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         from verl.utils.logger import log_with_rank
 
@@ -1239,7 +1235,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert self._is_actor or (not self._is_actor and self._is_rollout), (
             f"Checkpoint loading is only supported for Actor or standalone Rollout Workers, but got "
@@ -1267,17 +1263,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.actor_optimizer)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def start_profile(self, **kwargs) -> None:
         """Start profiling for the current rank in the current training step."""
         self.profiler.start(**kwargs)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def stop_profile(self) -> None:
         """Stop profiling for the current rank in the current training step."""
         self.profiler.stop()
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def dump_memory_snapshot(self, tag: str = "manual", sub_dir: str = None) -> None:
         """Manually trigger a CUDA memory snapshot dump on all ranks."""
         # Memory snapshot is now handled by the profiler system
@@ -1378,7 +1374,6 @@ class CriticWorker(Worker, DistProfilerExtension):
     def _build_critic_model_optimizer(self, config: FSDPCriticConfig):
         # the following line is necessary
         from torch.distributed.fsdp import MixedPrecision
-
         from verl.utils.model import load_valuehead_model, print_model_size
         from verl.utils.torch_dtypes import PrecisionType
 
@@ -1603,7 +1598,8 @@ class CriticWorker(Worker, DistProfilerExtension):
         if self.rank == 0:
             print(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
 
-        from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
+        from verl.utils.torch_functional import (
+            get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup)
 
         if lr_scheduler_type == "constant":
             critic_lr_scheduler = get_constant_schedule_with_warmup(
@@ -1624,7 +1620,7 @@ class CriticWorker(Worker, DistProfilerExtension):
 
         return critic_module, critic_optimizer, critic_lr_scheduler
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def init_model(self):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
@@ -1709,7 +1705,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         output = output.to("cpu")
         return output
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         import torch
 
@@ -1724,7 +1720,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.critic_module)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=True):
         import torch
 
@@ -1745,7 +1741,8 @@ class CriticWorker(Worker, DistProfilerExtension):
 
 # ================================= Async related workers =================================
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)  # pylint: disable=no-member
     async def update_weights(self, global_steps: int = None):
         await self.rollout_mode()
         return True

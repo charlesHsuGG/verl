@@ -27,7 +27,6 @@ from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 from transformers import PreTrainedTokenizer
-
 from verl.utils.device import get_device_name, get_torch_device
 
 try:
@@ -256,10 +255,10 @@ def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 20
     """
     entropy = torch.zeros(logits.shape[0], device=logits.device)
     for i in range(0, logits.shape[0], chunk_size):
-        logits_chunk = logits[i : i + chunk_size].float()
+        logits_chunk = logits[i: i + chunk_size].float()
         pd_chunk = torch.nn.functional.softmax(logits_chunk, dim=-1)
         entropy_chunk = torch.logsumexp(logits_chunk, dim=-1) - torch.sum(pd_chunk * logits_chunk, dim=-1)
-        entropy[i : i + chunk_size] = entropy_chunk
+        entropy[i: i + chunk_size] = entropy_chunk
     return entropy
 
 
@@ -591,7 +590,7 @@ def remove_pad_token(input_ids: torch.Tensor, attention_mask: torch.Tensor):
     """
     no_padding_batch = []
     for ids, mask in zip(input_ids, attention_mask, strict=True):
-        no_padding_batch.append((ids[len(ids) - mask.sum() :]).cpu().numpy().tolist())
+        no_padding_batch.append((ids[len(ids) - mask.sum():]).cpu().numpy().tolist())
     return no_padding_batch
 
 
@@ -605,7 +604,7 @@ def log_probs_from_logits_response(input_ids, logits, response_length):
     Returns:
         response_log_prob:
     """
-    response_logits = logits[:, -response_length - 1 : -1]
+    response_logits = logits[:, -response_length - 1: -1]
     response = input_ids[:, -response_length:]
     response_log_prob = logprobs_from_logits(logits=response_logits, labels=response)
     return response_log_prob
@@ -634,7 +633,7 @@ def log_probs_from_logits_response_rmpad(input_ids, attention_mask, logits_rmpad
     full_output = pad_input(
         hidden_states=full_log_probs_rmpad.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen
     )
-    output = full_output.squeeze(-1)[:, -response_length - 1 : -1]  # [batch_size, response_length]
+    output = full_output.squeeze(-1)[:, -response_length - 1: -1]  # [batch_size, response_length]
     return output
 
 
@@ -662,10 +661,10 @@ def log_probs_from_logits_all_rmpad(input_ids_rmpad, logits_rmpad, indices, batc
     input_ids_rmpad = input_ids_rmpad.squeeze(-1)
     input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=0)
     full_log_probs_rmpad = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)  # (total_nnz,)
-    full_output = pad_input(
+    full_output = pad_input(  # pylint: disable=possibly-used-before-assignment
         hidden_states=full_log_probs_rmpad.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen
     )
-    output = full_output.squeeze(-1)[:, -response_length - 1 : -1]  # [batch_size, response_length]
+    output = full_output.squeeze(-1)[:, -response_length - 1: -1]  # [batch_size, response_length]
     return output
 
 

@@ -39,7 +39,8 @@ from megatron.core.transformer.module import MegatronModule
 from omegaconf import OmegaConf
 from torch import nn
 from verl import DataProto
-from verl.trainer.ppo.core_algos import (agg_loss, get_policy_loss_fn,
+from verl.trainer.ppo.core_algos import (SUPPORT_SELF_DISTILL_LOSS_MODE,
+                                         agg_loss, get_policy_loss_fn,
                                          kl_penalty)
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
@@ -362,7 +363,7 @@ class MegatronPPOActor(BasePPOActor):
     def _update_teacher_ema(self) -> None:
         self_distillation_cfg = getattr(self.config, "self_distillation", None)
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-        if not self_distillation_cfg or loss_mode != "sdpo":
+        if not self_distillation_cfg or loss_mode not in SUPPORT_SELF_DISTILL_LOSS_MODE:
             return
         teacher_regularization = self.resolve_teacher_regularization(self_distillation_cfg)
         if teacher_regularization != "ema":
@@ -594,8 +595,14 @@ class MegatronPPOActor(BasePPOActor):
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys():
             select_keys.append("rollout_log_probs")
+        # [AJET] per-sample loss weight (episode-level loss normalization).
+        # Present only when ajet.trainer_common.loss_weight_normalization_episode_level
+        # is enabled; absent => every sample weighted equally (default behaviour).
+        if "loss_weight" in data.batch.keys():
+            select_keys.append("loss_weight")
+
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-        self_distillation_enabled = loss_mode == "sdpo"
+        self_distillation_enabled = loss_mode in SUPPORT_SELF_DISTILL_LOSS_MODE
         if self_distillation_enabled:
             self_distillation_required_keys = [
                 "teacher_input_ids",
@@ -745,8 +752,7 @@ class MegatronPPOActor(BasePPOActor):
             ret_entropy = None
             stats = {}
             if not forward_only:
-                old_log_prob = data["old_log_probs"]
-                advantages = data["advantages"]
+                old_log_prob, advantages = data["old_log_probs"], data["advantages"]
 
                 entropy_coeff = self.config.entropy_coeff
                 loss_agg_mode = self.config.loss_agg_mode
@@ -755,8 +761,14 @@ class MegatronPPOActor(BasePPOActor):
                 # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                 rollout_is_weights = data.get("rollout_is_weights", None)
 
+                # [AJET] Episode-level loss-weight normalization.
+                loss_weight = data.get("loss_weight", None)
+                if loss_weight is not None:
+                    loss_weight = loss_weight.to(advantages.dtype)
+                    advantages = advantages * loss_weight
+
                 loss_fn_kwargs = {}
-                if loss_mode in ["sdpo", "srpo", "sdrlvr"]:
+                if loss_mode in SUPPORT_SELF_DISTILL_LOSS_MODE:
                     assert "teacher_log_probs" in data, "SDPO must have `teacher_log_probs` in field."
                     full_log_prob = data.get("full_log_probs", None)
                     teacher_log_prob, teacher_full_log_prob = data["teacher_log_probs"], data.get("teacher_full_log_probs", None)
@@ -769,9 +781,6 @@ class MegatronPPOActor(BasePPOActor):
                         "full_log_prob": full_log_prob, "teacher_log_prob": teacher_log_prob, "teacher_full_log_prob": teacher_full_log_prob,
                         "self_distillation_mask": self_distillation_mask
                     })
-
-                    if loss_mode == "srpo":
-                        loss_fn_kwargs["is_correct_rollouts"] = data["is_correct_rollouts"]
 
                 policy_loss_fn = get_policy_loss_fn(loss_mode)
 
@@ -821,6 +830,12 @@ class MegatronPPOActor(BasePPOActor):
                     ref_log_prob = data["ref_log_prob"]
                     # compute kl loss
                     kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type)
+                    # [AJET] apply the per-token episode-level loss weight to
+                    # the KL term as well (same weight/shape used for the
+                    # policy-gradient term above), so each episode contributes
+                    # equally to the KL loss too.
+                    if loss_weight is not None:
+                        kld = kld * loss_weight
                     kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=self.config.loss_agg_mode)
 
                     policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
@@ -1049,7 +1064,7 @@ class MegatronPPOActor(BasePPOActor):
 
         """
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-        self_distillation_enabled = loss_mode == "sdpo"
+        self_distillation_enabled = loss_mode in SUPPORT_SELF_DISTILL_LOSS_MODE
         self_distillation_cfg = getattr(self.config, "self_distillation", None)
         teacher_regularization = "ema"
         teacher_update_rate = 0.0

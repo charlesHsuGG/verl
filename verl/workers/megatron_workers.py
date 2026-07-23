@@ -39,6 +39,7 @@ from verl.models.mcore import get_mcore_weight_converter
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import (
     Dispatch, make_nd_compute_dataproto_dispatch_fn, register)
+from verl.trainer.ppo.core_algos import SUPPORT_SELF_DISTILL_LOSS_MODE
 from verl.utils import hf_tokenizer
 from verl.utils.checkpoint.megatron_checkpoint_manager import \
     MegatronCheckpointManager
@@ -639,7 +640,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if self._is_actor:
                 self_distillation_cfg = self.config.actor.get("self_distillation", None)
                 loss_mode = self.config.actor.policy_loss.get("loss_mode", "vanilla")
-                if self_distillation_cfg is not None and loss_mode == "sdpo":
+                if self_distillation_cfg is not None and loss_mode in SUPPORT_SELF_DISTILL_LOSS_MODE:
                     teacher_regularization = self.actor.resolve_teacher_regularization(self_distillation_cfg)
                     teacher_update_rate = self.actor.resolve_teacher_update_rate(self_distillation_cfg)
                     if str(teacher_regularization).lower() in {"trust_region", "trust-region", "trustregion"}:

@@ -21,25 +21,25 @@ from tensordict.tensorclass import NonTensorData
 os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
-import logging
+import logging  # noqa
 
-import hydra
-import ray
-import torch
-import torch.distributed
-from omegaconf import OmegaConf
-from torch.utils.data import DistributedSampler
-from torchdata.stateful_dataloader import StatefulDataLoader
-from tqdm import tqdm
-
-from verl.utils import tensordict_utils as tu
-from verl.utils.checkpoint import CheckpointHandler, OrchestrationMode
-from verl.utils.dataset.dataset_utils import SFTTensorCollator
-from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
-from verl.utils.device import auto_set_device, get_device_name
-from verl.utils.logger import log_with_rank
-from verl.utils.tracking import Tracking
-from verl.workers.engine_workers import TrainingWorker
+import hydra  # noqa
+import ray  # noqa
+import torch  # noqa
+import torch.distributed  # noqa
+from omegaconf import OmegaConf  # noqa
+from torch.utils.data import DistributedSampler  # noqa
+from torchdata.stateful_dataloader import StatefulDataLoader  # noqa
+from tqdm import tqdm  # noqa
+from verl.utils import tensordict_utils as tu  # noqa
+from verl.utils.checkpoint import CheckpointHandler, OrchestrationMode  # noqa
+from verl.utils.dataset.dataset_utils import SFTTensorCollator  # noqa
+from verl.utils.dataset.multiturn_sft_dataset import \
+    MultiTurnSFTDataset  # noqa
+from verl.utils.device import auto_set_device, get_device_name  # noqa
+from verl.utils.logger import log_with_rank  # noqa
+from verl.utils.tracking import Tracking  # noqa
+from verl.workers.engine_workers import TrainingWorker  # noqa
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
@@ -129,7 +129,9 @@ class SFTTrainer:
                 )
 
         # create resource pool and worker group
-        from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+        from verl.single_controller.ray import (RayClassWithInitArgs,
+                                                RayResourcePool,
+                                                RayWorkerGroup)
 
         n_gpus_per_node = self.config.trainer.n_gpus_per_node
         nnodes = self.config.trainer.nnodes

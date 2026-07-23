@@ -18,7 +18,6 @@ from itertools import chain
 
 import torch
 from torch import distributed as dist
-
 from verl.protocol import DataProto
 from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
@@ -277,7 +276,7 @@ def log_seqlen_unbalance(seqlen_list: list[int], partitions: list[list[int]], pr
 
     # Iterate over each batch of sequence lengths
     for offset in range(0, len(seqlen_list), batch_size):
-        cur_sum_seqlen = sum(seqlen_list[offset : offset + batch_size])
+        cur_sum_seqlen = sum(seqlen_list[offset: offset + batch_size])
         if min_sum_seqlen is None or cur_sum_seqlen < min_sum_seqlen:
             min_sum_seqlen = cur_sum_seqlen
         if max_sum_seqlen is None or cur_sum_seqlen > max_sum_seqlen:

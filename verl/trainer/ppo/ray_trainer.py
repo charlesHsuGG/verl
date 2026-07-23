@@ -44,7 +44,8 @@ from verl.single_controller.ray import (RayClassWithInitArgs, RayWorkerGroup,
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
+from verl.trainer.ppo.core_algos import (SUPPORT_SELF_DISTILL_LOSS_MODE,
+                                         AdvantageEstimator, agg_loss)
 from verl.trainer.ppo.metric_utils import (compute_data_metrics,
                                            compute_throughout_metrics,
                                            compute_timing_metrics,
@@ -270,23 +271,31 @@ class RayPPOTrainer:
             train_sampler (Optional[Sampler], optional): Sampler for the training dataset. Defaults to None.
             device_name (str, optional): Device name for training (e.g., "cuda", "cpu"). Defaults to None.
         """
+        from omegaconf import open_dict
 
         # Store the tokenizer for text processing
         self.tokenizer: PreTrainedTokenizer = tokenizer
-        if config.algorithm.adv_estimator == "sdpo":
-            config.algorithm.adv_estimator = "grpo"
-            config.actor_rollout_ref.actor.policy_loss.loss_mode = 'sdpo'
 
-        if config.algorithm.adv_estimator == "sdrlvr":
-            config.algorithm.adv_estimator = "grpo"
-            config.actor_rollout_ref.actor.policy_loss.loss_mode = 'sdrlvr'
+        policy_loss_config = config.actor_rollout_ref.actor.policy_loss
 
-        if config.algorithm.adv_estimator == "srpo":
-            config.algorithm.adv_estimator = "grpo"
-            config.actor_rollout_ref.actor.policy_loss.loss_mode = 'srpo'
+        rollout_corr_config = config.algorithm.get("rollout_correction", None) or config.actor_rollout_ref.actor.policy_loss.get("rollout_correction", None)
+        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+
+        with open_dict(policy_loss_config):
+            if config.actor_rollout_ref.actor.ppo_epochs == 1 and (
+                config.actor_rollout_ref.actor.override_ppo_mini_batch_num == 1 or config.actor_rollout_ref.actor.ppo_mini_batch_size == config.data.train_batch_size
+            ):
+                policy_loss_config["is_on_policy"] = True
+
+            if bypass_recomputing_logprobs:
+                if rollout_corr_config["loss_type"] not in {"reinforce", "ppo_clip"}:
+                    rollout_corr_config["loss_type"] = config.actor_rollout_ref.actor.policy_loss["loss_mode"]
+
+                policy_loss_config["rollout_correction"] = rollout_corr_config
+                policy_loss_config["loss_mode"] = "bypass_mode"
 
         loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
-        if loss_mode == "sdpo":
+        if loss_mode in SUPPORT_SELF_DISTILL_LOSS_MODE:
             self.tokenizer.padding_side = "left"
             reprompt_truncation = config.actor_rollout_ref.actor.get("self_distillation", {}).get("reprompt_truncation")
             if reprompt_truncation in {"left", "right"}:
@@ -564,7 +573,7 @@ class RayPPOTrainer:
         """Build SDPO teacher inputs and distillation masks when loss_mode is set to ``sdpo``."""
         self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
         loss_mode = self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
-        if self_distillation_cfg is None or loss_mode != "sdpo":
+        if self_distillation_cfg is None or loss_mode not in SUPPORT_SELF_DISTILL_LOSS_MODE:
             return None
 
         if "raw_prompt" not in batch.non_tensor_batch:
@@ -578,48 +587,59 @@ class RayPPOTrainer:
         batch_size = batch.batch.batch_size[0]
 
         response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in responses]
-        raw_prompts = batch.non_tensor_batch["raw_prompt"]
 
-        prompt_texts: list[str] = []
-        for messages in raw_prompts:
-            if isinstance(messages, str):
-                messages = literal_eval(messages)  # handle single string prompt as list of one message
-            if len(messages) == 0:
-                prompt_texts.append("")
-                continue
-            content = messages[-1].get("content", "")
-            if not isinstance(content, str):
-                raise ValueError("SDPO currently only supports textual single-turn prompts.")
-            prompt_texts.append(content)
-
+        feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
         feedback_list = self._collect_feedback(
             include_environment_feedback=self_distillation_cfg.include_environment_feedback,
-            reward_extra_infos_dict=reward_extra_infos_dict,
-            batch_size=batch_size,
+            reward_extra_infos_dict=reward_extra_infos_dict, batch_size=batch_size,
         )
 
         success_by_uid = self._collect_solutions_by_uid(
-            batch,
-            reward_tensor,
+            batch, reward_tensor,
             success_reward_threshold=self_distillation_cfg.success_reward_threshold,
         )
         solution_strs = [
             self._get_solution(
-                i,
-                success_by_uid,
-                batch.non_tensor_batch["uid"],
-                response_texts,
-                self_distillation_cfg.dont_reprompt_on_self_success,
+                i, success_by_uid, batch.non_tensor_batch["uid"],
+                response_texts, self_distillation_cfg.dont_reprompt_on_self_success,
                 self_distillation_cfg.get("remove_thinking_from_demonstration", False),
-            )
-            for i in range(batch_size)
+            ) if not feedback_only_without_solution else None for i in range(batch_size)
         ]
 
         def _build_teacher_message(i: int) -> list[dict]:
-            system_messages = (literal_eval(raw_prompts[i])[:-1] if isinstance(raw_prompts[i], str) else raw_prompts[i][:-1]) if len(raw_prompts[i]) > 1 else []
+            raw_prompt_messages = batch.non_tensor_batch["raw_prompt"][i]
+            if isinstance(raw_prompt_messages, str):
+                raw_prompt_messages = literal_eval(raw_prompt_messages)  # ptlint: disable=used-before-assignment # noqa
+
+            input_prompt_text = ""
+            if len(raw_prompt_messages) > 0:
+                content = raw_prompt_messages[-1].get("content", "")
+                if not isinstance(content, str):
+                    raise ValueError("SDPO currently only supports textual single-turn prompts.")
+                input_prompt_text = content
+
+            system_messages = []
+            for message in raw_prompt_messages[:-1]:
+                formated_tool_calls = []
+                tool_calls = message.get("tool_calls", []) or []
+                for tool_call in tool_calls:
+                    tool_name, tool_arguments = tool_call.get('function', {}).get('name', "undefine"), tool_call.get('function', {}).get('arguments', None) or "{}"
+                    try:
+                        tool_arguments = json.loads(tool_arguments)
+                        if 'function' not in tool_call:
+                            tool_call = {"function": {'name': tool_name, 'arguments': tool_arguments}}
+                        else:
+                            tool_call['function']['arguments'] = tool_arguments
+                        formated_tool_calls.append(tool_call)
+                    except json.JSONDecodeError as e:
+                        print(f"Failed to decode JSON safely! Error details: {e}")
+                        print(f"Error message snippet: {e.msg}")
+                        print(f"Error occurred at line {e.lineno}, column {e.colno}")
+                        message["content"] += "\n<tool_call>\n<function=" + tool_name + ">\n<parameter=" + tool_arguments + ">\n</parameter>\n</function>\n</tool_call>"
+                message["tool_calls"] = formated_tool_calls
+                system_messages.append(message)
             has_solution = solution_strs[i] is not None
             has_feedback = feedback_list[i] is not None
-            feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
 
             feedback_section = ""
             if has_feedback:
@@ -627,43 +647,28 @@ class RayPPOTrainer:
 
             solution_section = ""
             if has_solution:
-                solution_section = self_distillation_cfg.solution_template.format(
-                    successful_previous_attempt=solution_strs[i]
-                )
-
-            if feedback_only_without_solution:
-                # If feedback_only_without_solution is True, only use feedback
-                solution_section = ""
+                solution_section = self_distillation_cfg.solution_template.format(successful_previous_attempt=solution_strs[i])
 
             if feedback_section or solution_section:
                 reprompt_text = self_distillation_cfg.reprompt_template.format(
-                    prompt=prompt_texts[i],
-                    solution=solution_section,
+                    prompt=input_prompt_text, solution=solution_section,
                     feedback=feedback_section,
                 )
             else:
-                reprompt_text = prompt_texts[i]
+                reprompt_text = input_prompt_text
 
             return system_messages + [{"role": "user", "content": reprompt_text}]
 
         messages = [_build_teacher_message(i) for i in range(batch_size)]
+        print(f"[DEBUG] First batch reprompt_text: {messages[0][-1]['content']}")
         apply_kwargs = dict(self.config.data.get("apply_chat_template_kwargs", {}))
         chat_template_kwargs = dict(
-            tokenize=True,
-            return_tensors="pt",
-            return_dict=True,
-            add_generation_prompt=True,
-            max_length=self_distillation_cfg.max_reprompt_len,
-            padding=True,
-            truncation=True,
-            **apply_kwargs,
+            tokenize=True, return_tensors="pt", return_dict=True,
+            add_generation_prompt=True, max_length=self_distillation_cfg.max_reprompt_len,
+            padding=True, truncation=True, **apply_kwargs,
         )
         try:
-            teacher_prompt = self.tokenizer.apply_chat_template(
-                messages,
-                continue_final_message=False,
-                **chat_template_kwargs,
-            )
+            teacher_prompt = self.tokenizer.apply_chat_template(messages, continue_final_message=False, **chat_template_kwargs)
         except TypeError:
             teacher_prompt = self.tokenizer.apply_chat_template(messages, **chat_template_kwargs)
 
@@ -684,32 +689,23 @@ class RayPPOTrainer:
             dim=1,
         )
         teacher_position_ids = compute_position_id_with_mask(teacher_attention_mask)
-
-        feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
-        feedback_used = [
-            feedback_list[i] is not None and (not feedback_only_without_solution or solution_strs[i] is None)
-            for i in range(batch_size)
-        ]
         self_distillation_mask = torch.tensor(
-            [solution_strs[i] is not None or feedback_used[i] for i in range(batch_size)],
-            dtype=torch.float32,
-            device=device,
+            [solution_strs[i] is not None or feedback_list[i] is not None for i in range(batch_size)],
+            dtype=torch.float32, device=device,
         )
+        if loss_mode == "srpo":
+            is_correct_rollouts = reward_tensor.sum(dim=-1).detach().to(torch.float32) >= self_distillation_cfg.success_reward_threshold
+            self_distillation_mask = ~is_correct_rollouts * self_distillation_mask
 
         unique_uids = set(batch.non_tensor_batch["uid"])
-        num_with_feedback_available = sum(1 for f in feedback_list if f is not None)
-        num_with_feedback_used = sum(1 for f in feedback_used if f)
-        num_with_solution = sum(1 for s in solution_strs if s is not None)
+        num_with_feedback_used = sum(1 for i in range(batch_size) if feedback_list[i] is not None)
+        num_with_solution = sum(1 for i in range(batch_size) if solution_strs[i] is not None)
         metrics = {
-            "self_distillation/success_group_fraction": len(
-                [uid for uid in unique_uids if len(success_by_uid[uid]) > 0]
-            ) / len(unique_uids),
+            "self_distillation/success_group_fraction": len([uid for uid in unique_uids if len(success_by_uid[uid]) > 0]) / len(unique_uids),
             "self_distillation/success_sample_fraction": num_with_solution / batch_size,
-            "self_distillation/feedback_available_fraction": num_with_feedback_available / batch_size,
             "self_distillation/feedback_used_fraction": num_with_feedback_used / batch_size,
             "self_distillation/reprompt_sample_fraction": self_distillation_mask.float().mean().item(),
         }
-
         return (
             DataProto.from_dict(
                 tensors={
@@ -718,9 +714,6 @@ class RayPPOTrainer:
                     "teacher_position_ids": teacher_position_ids,
                     "self_distillation_mask": self_distillation_mask,
                 },
-                non_tensors={
-                    "is_correct_rollouts": reward_tensor.sum(dim=-1).detach().to(torch.float32).cpu().numpy() >= self_distillation_cfg.success_reward_threshold,
-                }
             ),
             metrics,
         )
@@ -1128,8 +1121,7 @@ class RayPPOTrainer:
         remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
         if remove_previous_ckpt_in_save:
             print(
-                "Warning: remove_previous_ckpt_in_save is deprecated,"
-                + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
+                "Warning: remove_previous_ckpt_in_save is deprecated, set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
             )
         max_actor_ckpt_to_keep = (
             self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
@@ -1163,11 +1155,9 @@ class RayPPOTrainer:
 
         # latest checkpointed iteration tracker (for atomic usage)
         if (
-            hasattr(self.config.actor_rollout_ref.actor.checkpoint, "async_save")
-            and self.config.actor_rollout_ref.actor.checkpoint.async_save
+            hasattr(self.config.actor_rollout_ref.actor.checkpoint, "async_save") and self.config.actor_rollout_ref.actor.checkpoint.async_save
         ) or (
-            "async_save" in self.config.actor_rollout_ref.actor.checkpoint
-            and self.config.actor_rollout_ref.actor.checkpoint["async_save"]
+            "async_save" in self.config.actor_rollout_ref.actor.checkpoint and self.config.actor_rollout_ref.actor.checkpoint["async_save"]
         ):
             print("skip write latest_checkpointed_iteration.txt when async_save is True")
             return
@@ -1658,14 +1648,14 @@ class RayPPOTrainer:
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        from verl.trainer.ppo.rollout_corr_helper import \
-                            apply_bypass_mode  # pylint: disable=import-outside-toplevel
+                        if "rollout_log_probs" not in batch.batch:
+                            raise ValueError(
+                                "bypass_mode=True requires rollout_log_probs in batch. "
+                                "Ensure rollout worker is configured to calculate_log_probs=true."
+                            )
 
-                        apply_bypass_mode(
-                            batch=batch,
-                            rollout_corr_config=rollout_corr_config,
-                            policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
-                        )
+                        # Use rollout log probs as old log probs (zero-cost substitution)
+                        batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
@@ -1723,7 +1713,7 @@ class RayPPOTrainer:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
                         # compute rewards. apply_kl_penalty if available
-                        if self.config.algorithm.use_kl_in_reward:
+                        if "old_log_probs" in batch.batch and self.config.algorithm.use_kl_in_reward:
                             batch, kl_metrics = apply_kl_penalty(
                                 batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
                             )
@@ -1735,9 +1725,7 @@ class RayPPOTrainer:
                         # Only runs in decoupled mode (computes once per batch using stable π_old)
                         # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
                         if (
-                            rollout_corr_config is not None
-                            and "rollout_log_probs" in batch.batch
-                            and not bypass_recomputing_logprobs  # Only in decoupled mode
+                            rollout_corr_config is not None and "rollout_log_probs" in batch.batch and not bypass_recomputing_logprobs  # Only in decoupled mode
                         ):
                             from verl.trainer.ppo.rollout_corr_helper import \
                                 compute_rollout_correction_and_add_to_batch  # pylint: disable=import-outside-toplevel
@@ -1893,4 +1881,5 @@ class RayPPOTrainer:
                 # in favor of a general-purpose data buffer pool
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
+                    self.train_dataset.on_batch_end(batch=batch)
                     self.train_dataset.on_batch_end(batch=batch)

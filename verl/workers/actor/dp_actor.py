@@ -29,7 +29,8 @@ from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.tensor import DTensor
 from verl import DataProto
-from verl.trainer.ppo.core_algos import (agg_loss, get_policy_loss_fn,
+from verl.trainer.ppo.core_algos import (SUPPORT_SELF_DISTILL_LOSS_MODE,
+                                         agg_loss, get_policy_loss_fn,
                                          kl_penalty)
 from verl.utils.attention_utils import (index_first_axis, pad_input, rearrange,
                                         unpad_input)
@@ -174,7 +175,7 @@ class DataParallelPPOActor(BasePPOActor):
     def _update_teacher_ema(self) -> None:
         self_distillation_cfg = getattr(self.config, "self_distillation", None)
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-        if not self_distillation_cfg or loss_mode != "sdpo":
+        if not self_distillation_cfg or loss_mode not in SUPPORT_SELF_DISTILL_LOSS_MODE:
             return
         teacher_regularization = self.resolve_teacher_regularization(self_distillation_cfg)
         if teacher_regularization != "ema":
@@ -247,7 +248,7 @@ class DataParallelPPOActor(BasePPOActor):
             )
             if can_use_pg and "response_mask" in micro_batch and "uid" in micro_batch:
                 from verl.trainer.ppo.prefix_grouper_utils import \
-                    forward_micro_batch_with_prefix_grouper
+                    forward_micro_batch_with_prefix_grouper  # pylint: disable=import-outside-toplevel
 
                 return forward_micro_batch_with_prefix_grouper(
                     micro_batch=micro_batch,
@@ -703,11 +704,20 @@ class DataParallelPPOActor(BasePPOActor):
         # make sure we are in training mode
         self.actor_module.train()
 
+        # [VERL] Optional: estimate the GPU-memory limit of ppo_max_token_len_per_gpu and raise.
+        # Triggered by env VERL_FIND_MAX_PPO_TOKEN_LEN. Intercepts the *first* real PPO update
+        # (model + grads + optimizer already resident, so the measurement is realistic). See
+        # verl.utils.find_max_ppo_token_len. It never returns.
+        if os.environ.get("VERL_FIND_MAX_PPO_TOKEN_LEN"):
+            from verl.utils.find_max_ppo_token_len import \
+                find_max_ppo_token_len_per_gpu
+            find_max_ppo_token_len_per_gpu(self, data)
+
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         pad_token_id = data.meta_info.get("pad_token_id", 0)
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
-        self_distillation_enabled = loss_mode in ["sdpo", "srpo", "sdrlvr"]
+        self_distillation_enabled = loss_mode in SUPPORT_SELF_DISTILL_LOSS_MODE
         self_distillation_cfg = getattr(self.config, "self_distillation", None)
         teacher_regularization = "ema"
         teacher_update_rate = 0.0
@@ -777,7 +787,7 @@ class DataParallelPPOActor(BasePPOActor):
             non_tensor_select_keys.append("multi_modal_inputs")
         if self.use_prefix_grouper and "uid" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("uid")
-        if loss_mode == "srpo":
+        if loss_mode in ["srpo"]:
             non_tensor_select_keys.append("is_correct_rollout")
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
@@ -794,12 +804,10 @@ class DataParallelPPOActor(BasePPOActor):
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(mini_batch_split_size)
 
-        on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
+        # on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
+        on_policy = self.config.policy_loss.get("is_on_policy", False)
 
-        metrics = {
-            "actor/pg_loss": 0.0,
-            "actor/kl_loss": 0.0,
-        }
+        metrics = {"actor/pg_loss": 0.0, "actor/kl_loss": 0.0}
         did_update = False
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
@@ -821,7 +829,6 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch, "pad_token_id": pad_token_id}
                     response_mask = model_inputs["response_mask"]
-                    old_log_prob = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
 
                     # [AJET] Episode-level loss-weight normalization.
@@ -865,12 +872,25 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # for fully_async_policy
                     if hasattr(self.config, "use_rollout_log_probs") and self.config.use_rollout_log_probs:
+                        assert "old_log_probs" in model_inputs, f'"old_log_prob" not in {model_inputs.keys()=}'
+
                         old_log_prob = model_inputs["old_log_probs"]
                     else:
                         if on_policy:
                             old_log_prob = log_prob.detach()
                         else:
+                            assert "old_log_probs" in model_inputs, f'"old_log_prob" not in {model_inputs.keys()=}'
+
                             old_log_prob = model_inputs["old_log_probs"]
+
+                    # # for fully_async_policy
+                    # if hasattr(self.config, "use_rollout_log_probs") and self.config.use_rollout_log_probs:
+                    #     old_log_prob = model_inputs["old_log_probs"]
+                    # else:
+                    #     if on_policy:
+                    #         old_log_prob = log_prob.detach()
+                    #     else:
+                    #         old_log_prob = model_inputs["old_log_probs"]
 
                     # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
 
@@ -902,8 +922,6 @@ class DataParallelPPOActor(BasePPOActor):
                             "full_log_prob": full_log_prob, "teacher_log_prob": teacher_log_prob, "teacher_full_log_prob": teacher_full_log_prob,
                             "self_distillation_mask": self_distillation_mask
                         })
-                        if loss_mode == "srpo":
-                            loss_fn_kwargs["is_correct_rollouts"] = model_inputs["is_correct_rollouts"]
 
                     # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
                     # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
