@@ -18,8 +18,10 @@ The main entry point to run the PPO algorithm
 import datetime
 import logging
 import os
+import random
 import time
 
+import numpy as np
 import psutil
 import torch
 import torch.distributed
@@ -82,10 +84,6 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def set_random_seed(seed, only_rollout=False):
-    import random
-
-    import numpy as np
-    import torch
 
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -101,6 +99,7 @@ def set_random_seed(seed, only_rollout=False):
 
 
 class MegatronWorker(Worker):
+
     def _init_hf_config_and_tf_config(
         self,
         model_path,
@@ -118,22 +117,22 @@ class MegatronWorker(Worker):
         from verl.utils.model import update_model_config
 
         # Step 1: initialize the tokenizer
-        self.local_path = copy_to_local(model_path)
+        self.local_path = copy_to_local(model_path)  # pylint: disable=attribute-defined-outside-init
         if tokenizer_or_path is None:
-            self.tokenizer = hf_tokenizer(self.local_path, trust_remote_code=trust_remote_code)
-            self.processor = hf_processor(self.local_path, trust_remote_code=trust_remote_code)
+            self.tokenizer = hf_tokenizer(self.local_path, trust_remote_code=trust_remote_code)  # pylint: disable=attribute-defined-outside-init
+            self.processor = hf_processor(self.local_path, trust_remote_code=trust_remote_code)  # pylint: disable=attribute-defined-outside-init
         elif isinstance(tokenizer_or_path, str):
-            self.tokenizer = hf_tokenizer(copy_to_local(tokenizer_or_path), trust_remote_code=trust_remote_code)
-            self.processor = hf_processor(copy_to_local(tokenizer_or_path), trust_remote_code=trust_remote_code)
+            self.tokenizer = hf_tokenizer(copy_to_local(tokenizer_or_path), trust_remote_code=trust_remote_code)  # pylint: disable=attribute-defined-outside-init
+            self.processor = hf_processor(copy_to_local(tokenizer_or_path), trust_remote_code=trust_remote_code)  # pylint: disable=attribute-defined-outside-init
         else:
-            self.tokenizer = tokenizer_or_path
-            self.processor = tokenizer_or_path
+            self.tokenizer = tokenizer_or_path  # pylint: disable=attribute-defined-outside-init
+            self.processor = tokenizer_or_path  # pylint: disable=attribute-defined-outside-init
 
-        if self.config.model.get("custom_chat_template", None) is not None:
+        if self.config.model.get("custom_chat_template", None) is not None:  # pylint: disable=no-member
             if self.processor is not None:
-                self.processor.chat_template = self.config.model.custom_chat_template
+                self.processor.chat_template = self.config.model.custom_chat_template  # pylint: disable=no-member
             else:
-                self.tokenizer.chat_template = self.config.model.custom_chat_template
+                self.tokenizer.chat_template = self.config.model.custom_chat_template  # pylint: disable=no-member
 
         # Step 2: get the hf
         hf_config = AutoConfig.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
@@ -145,26 +144,26 @@ class MegatronWorker(Worker):
             "pad_token_id": self.tokenizer.pad_token_id,
         }
         override_config_kwargs.update(override_model_config.get("model_config", {}))
-        self.share_embeddings_and_output_weights = getattr(hf_config, "tie_word_embeddings", False)
+        self.share_embeddings_and_output_weights = getattr(hf_config, "tie_word_embeddings", False)  # pylint: disable=attribute-defined-outside-init
 
         # only actor need enable mtp
         if enable_mtp:
             assert hf_config.num_nextn_predict_layers > 0, "MTP requires at least one nextn_predict_layer"
             assert megatron_config.use_mbridge, "MTP requires use_mbridge to be True"
-            override_transformer_config["mtp_loss_scaling_factor"] = self.config.model.mtp.mtp_loss_scaling_factor
+            override_transformer_config["mtp_loss_scaling_factor"] = self.config.model.mtp.mtp_loss_scaling_factor  # pylint: disable=no-member
         else:
             if hasattr(hf_config, "num_nextn_predict_layers"):
                 hf_config.num_nextn_predict_layers = 0
 
-        self.enable_mtp = enable_mtp
+        self.enable_mtp = enable_mtp  # pylint: disable=attribute-defined-outside-init
 
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
-        self.architectures = getattr(hf_config, "architectures", None)
+        self.architectures = getattr(hf_config, "architectures", None)  # pylint: disable=attribute-defined-outside-init
         if self.rank == 0:
             print(f"Model config after override: {hf_config}")
 
         from verl.models.mcore.config_converter import \
-            mapping_string_to_attn_backend
+            mapping_string_to_attn_backend  # pylint: disable=import-outside-toplevel
 
         # todo: remove this line after mcore adopt mbridge 0.15, now for compatibility
         override_transformer_config = mapping_string_to_attn_backend(override_transformer_config)
@@ -173,11 +172,12 @@ class MegatronWorker(Worker):
         if fp16:
             assert megatron_config.use_mbridge, "fp16 mode requires use_mbridge to be True"
 
-        self.provider = None
-        self.vanilla_bridge = megatron_config.get("vanilla_mbridge", True)
+        self.provider = None  # pylint: disable=attribute-defined-outside-init
+        self.vanilla_bridge = megatron_config.get("vanilla_mbridge", True)  # pylint: disable=attribute-defined-outside-init
         if megatron_config.use_mbridge:
             if self.vanilla_bridge:
-                from verl.models.mcore.mbridge import AutoBridge
+                from verl.models.mcore.mbridge import \
+                    AutoBridge  # pylint: disable=import-outside-toplevel
 
                 bridge = AutoBridge.from_config(hf_config, dtype=dtype)
                 bridge.set_extra_args(**override_transformer_config)
@@ -185,7 +185,8 @@ class MegatronWorker(Worker):
                 tf_config.fp16 = fp16
                 tf_config.bf16 = bf16
             else:
-                from verl.models.mcore.bridge import AutoBridge
+                from verl.models.mcore.bridge import \
+                    AutoBridge  # pylint: disable=import-outside-toplevel
 
                 # Use Megatron-Bridge to convert HF config to Megatron config
                 bridge = AutoBridge.from_hf_pretrained(self.local_path, trust_remote_code=trust_remote_code)
@@ -221,25 +222,25 @@ class MegatronWorker(Worker):
                     setattr(provider, key, value)
 
                 provider.finalize()
-                self.provider = provider
+                self.provider = provider  # pylint: disable=attribute-defined-outside-init
                 tf_config = None  # Will be set after model creation
-            self.bridge = bridge
+            self.bridge = bridge  # pylint: disable=attribute-defined-outside-init
         else:
             tf_config = hf_to_mcore_config(hf_config, dtype, **override_transformer_config)
-            self.bridge = None
+            self.bridge = None  # pylint: disable=attribute-defined-outside-init
 
         if torch.distributed.get_rank() == 0:
             if tf_config is not None:
                 print(f"TF config: {tf_config}")
-        self.hf_config = hf_config
-        self.tf_config = tf_config
+        self.hf_config = hf_config  # pylint: disable=attribute-defined-outside-init
+        self.tf_config = tf_config  # pylint: disable=attribute-defined-outside-init
 
         # Get PEFT config from model.lora if specified
         from verl.workers.config.megatron_peft import get_peft_cls
 
         self.peft_cls = get_peft_cls(
             model_config=self.config.model, bridge=self.bridge, provider=self.provider, dtype=dtype
-        )
+        )  # pylint: disable=attribute-defined-outside-init, no-member
 
 
 class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
@@ -292,9 +293,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         if self._is_actor or self._is_ref:
             is_collect = (
-                mpu.get_tensor_model_parallel_rank() == 0
-                and mpu.get_pipeline_model_parallel_rank() == mpu.get_pipeline_model_parallel_world_size() - 1
-                and mpu.get_context_parallel_rank() == 0
+                mpu.get_tensor_model_parallel_rank() == 0 and mpu.get_pipeline_model_parallel_rank() == mpu.get_pipeline_model_parallel_world_size(
+                ) - 1 and mpu.get_context_parallel_rank() == 0
             )
             self._register_dispatch_collect_info(
                 mesh_name="actor", dp_rank=mpu.get_data_parallel_rank(), is_collect=is_collect
@@ -523,8 +523,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         self.rollout_device_mesh = rollout_device_mesh
 
         is_collect = (
-            rollout_device_mesh["infer_tp"].get_local_rank() == 0
-            and rollout_device_mesh["infer_pp"].get_local_rank() == 0
+            rollout_device_mesh["infer_tp"].get_local_rank() == 0 and rollout_device_mesh["infer_pp"].get_local_rank() == 0
         )
         self._register_dispatch_collect_info(
             "rollout", dp_rank=rollout_device_mesh["dp"].get_local_rank(), is_collect=is_collect
@@ -1048,9 +1047,8 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
             )
 
         is_collect = (
-            mpu.get_tensor_model_parallel_rank() == 0
-            and mpu.get_pipeline_model_parallel_rank() == mpu.get_pipeline_model_parallel_world_size() - 1
-            and mpu.get_context_parallel_rank() == 0
+            mpu.get_tensor_model_parallel_rank() == 0 and mpu.get_pipeline_model_parallel_rank() == mpu.get_pipeline_model_parallel_world_size(
+            ) - 1 and mpu.get_context_parallel_rank() == 0
         )
         self._register_dispatch_collect_info(
             mesh_name="critic", dp_rank=mpu.get_data_parallel_rank(), is_collect=is_collect

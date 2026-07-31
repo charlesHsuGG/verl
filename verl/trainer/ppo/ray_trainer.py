@@ -294,12 +294,6 @@ class RayPPOTrainer:
                 policy_loss_config["rollout_correction"] = rollout_corr_config
                 policy_loss_config["loss_mode"] = "bypass_mode"
 
-        loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
-        if loss_mode in SUPPORT_SELF_DISTILL_LOSS_MODE:
-            self.tokenizer.padding_side = "left"
-            reprompt_truncation = config.actor_rollout_ref.actor.get("self_distillation", {}).get("reprompt_truncation")
-            if reprompt_truncation in {"left", "right"}:
-                self.tokenizer.truncation_side = reprompt_truncation
         self.processor = processor
         self.config = config
 
@@ -565,9 +559,7 @@ class RayPPOTrainer:
         return solution_str
 
     def _maybe_build_self_distillation_batch(
-        self,
-        batch: DataProto,
-        reward_tensor: torch.Tensor,
+        self, batch: DataProto, reward_tensor: torch.Tensor,
         reward_extra_infos_dict: Optional[dict[str, list]] = None,
     ) -> Optional[tuple[DataProto, dict[str, float]]]:
         """Build SDPO teacher inputs and distillation masks when loss_mode is set to ``sdpo``."""
@@ -661,16 +653,23 @@ class RayPPOTrainer:
 
         messages = [_build_teacher_message(i) for i in range(batch_size)]
         print(f"[DEBUG] First batch reprompt_text: {messages[0][-1]['content']}")
+
+        orginal_truncation_side = self.tokenizer.truncation_side
+        reprompt_truncation = self.config.actor_rollout_ref.actor.get("self_distillation", {}).get("reprompt_truncation")
+        if reprompt_truncation in {"left", "right"}:
+            self.tokenizer.truncation_side = reprompt_truncation
         apply_kwargs = dict(self.config.data.get("apply_chat_template_kwargs", {}))
         chat_template_kwargs = dict(
             tokenize=True, return_tensors="pt", return_dict=True,
             add_generation_prompt=True, max_length=self_distillation_cfg.max_reprompt_len,
-            padding=True, truncation=True, **apply_kwargs,
+            padding=True, truncation=True, tokenizer_kwargs={"padding_side": "left"}, **apply_kwargs,
         )
         try:
             teacher_prompt = self.tokenizer.apply_chat_template(messages, continue_final_message=False, **chat_template_kwargs)
         except TypeError:
             teacher_prompt = self.tokenizer.apply_chat_template(messages, **chat_template_kwargs)
+
+        self.tokenizer.truncation_side = orginal_truncation_side
 
         if isinstance(teacher_prompt, torch.Tensor):
             teacher_prompt_input_ids = teacher_prompt
@@ -690,8 +689,7 @@ class RayPPOTrainer:
         )
         teacher_position_ids = compute_position_id_with_mask(teacher_attention_mask)
         self_distillation_mask = torch.tensor(
-            [solution_strs[i] is not None or feedback_list[i] is not None for i in range(batch_size)],
-            dtype=torch.float32, device=device,
+            [solution_strs[i] is not None or feedback_list[i] is not None for i in range(batch_size)], dtype=torch.int32, device=device,
         )
         if loss_mode == "srpo":
             is_correct_rollouts = reward_tensor.sum(dim=-1).detach().to(torch.float32) >= self_distillation_cfg.success_reward_threshold
@@ -1566,7 +1564,6 @@ class RayPPOTrainer:
                         if curr_step_profile:
                             self.async_rollout_manager.start_profile()
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                        self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
                             self.async_rollout_manager.stop_profile()
 
@@ -1580,7 +1577,6 @@ class RayPPOTrainer:
                             if curr_step_profile:
                                 self.async_rollout_manager.start_profile()
                             gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                            self.checkpoint_manager.sleep_replicas()
                             if curr_step_profile:
                                 self.async_rollout_manager.stop_profile()
                             batch = batch.union(gen_baseline_output)
@@ -1601,6 +1597,9 @@ class RayPPOTrainer:
                             batch.batch["reward_baselines"] = reward_baseline_tensor
 
                             del rm_scores, gen_baseline_batch, gen_baseline_output
+
+                    self.checkpoint_manager.sleep_replicas()
+
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
@@ -1776,9 +1775,7 @@ class RayPPOTrainer:
                         # 3. The current step number is a multiple of the save frequency.
                         # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
                         if self.config.trainer.save_freq > 0 and (
-                            is_last_step
-                            or self.global_steps % self.config.trainer.save_freq == 0
-                            or esi_close_to_expiration
+                            is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
                         ):
                             if esi_close_to_expiration:
                                 print("Force saving checkpoint: ESI instance expiration approaching.")

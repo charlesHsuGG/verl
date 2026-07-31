@@ -397,9 +397,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # patch for qwen2.5-vl: when using flash_attention_3, set vision tower to use flash_attention_2
         # because the vision tower does not support flash_attention_3
         if (
-            getattr(actor_model_config, "model_type", None) == "qwen2_5_vl"
-            and attn_implementation == "flash_attention_3"
-            and hasattr(actor_model_config, "vision_config")
+            getattr(actor_model_config, "model_type", None) == "qwen2_5_vl" and attn_implementation == "flash_attention_3" and hasattr(
+                actor_model_config, "vision_config"
+            )
         ):
             actor_model_config.vision_config._attn_implementation = "flash_attention_2"
 
@@ -470,7 +470,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
                 from liger_kernel.transformers.monkey_patch import \
-                    _apply_liger_kernel_to_instance
+                    _apply_liger_kernel_to_instance  # noqa
 
                 _apply_liger_kernel_to_instance(model=actor_module)
 
@@ -706,8 +706,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self._register_dispatch_collect_info("rollout", dp_rank=self.rank, is_collect=True)
         else:
             is_collect = (
-                rollout_device_mesh["infer_tp"].get_local_rank() == 0
-                and rollout_device_mesh["infer_pp"].get_local_rank() == 0
+                rollout_device_mesh["infer_tp"].get_local_rank() == 0 and rollout_device_mesh["infer_pp"].get_local_rank() == 0
             )
             self._register_dispatch_collect_info(
                 "rollout", dp_rank=rollout_device_mesh["dp"].get_local_rank(), is_collect=is_collect
@@ -776,9 +775,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # Here: params contains LoRA weights, base_model_params contains base model weights.
         # Only needed if the rollout engine actually sleeps/frees weights (free_cache_engine=True).
         if (
-            peft_config is not None
-            and getattr(self.rollout, "sleep_level", None) == 2
-            and self.config.rollout.free_cache_engine
+            peft_config is not None and getattr(self.rollout, "sleep_level", None) == 2 and self.config.rollout.free_cache_engine
         ):
             base_model_params = collect_lora_params(
                 module=self.actor_module_fsdp,
@@ -828,9 +825,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After resume weights", logger=logger)
 
         if (
-            peft_config is not None
-            and getattr(self.rollout, "sleep_level", None) == 2
-            and self.config.rollout.free_cache_engine
+            peft_config is not None and getattr(self.rollout, "sleep_level", None) == 2 and self.config.rollout.free_cache_engine
         ):
             per_tensor_base_params = (
                 (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
