@@ -67,12 +67,11 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import (calculate_workload,
                                          get_seqlen_balanced_partitions,
                                          log_seqlen_unbalance)
-from verl.utils.torch_functional import masked_mean
+from verl.utils.torch_functional import masked_mean, pad_sequence_to_length
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import (left_right_2_no_padding,
                                         no_padding_2_padding)
-from verl.utils.torch_functional import pad_sequence_to_length
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -504,11 +503,7 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     @staticmethod
-    def _collect_feedback(
-        include_environment_feedback: bool,
-        reward_extra_infos_dict: Optional[dict[str, Any]],
-        batch_size: int,
-    ) -> list[Any]:
+    def _collect_feedback(include_environment_feedback: bool, reward_extra_infos_dict: Optional[dict[str, Any]], batch_size: int) -> list[Any]:
         """Collect non-empty textual environment feedback from reward extras."""
         feedback_list: list[Any] = [None] * batch_size
         if include_environment_feedback and reward_extra_infos_dict is not None:
@@ -520,16 +515,14 @@ class RayPPOTrainer:
                     feedback_list[i] = raw_feedback[i]
         return feedback_list
 
-    def _collect_solutions_by_uid(
-        self, batch: DataProto, reward_tensor: torch.Tensor, success_reward_threshold: float
-    ) -> dict[Any, list[int]]:
+    def _collect_solutions_by_uid(self, batch: DataProto, reward_tensor: torch.Tensor, success_reward_threshold: float) -> dict[Any, list[tuple[int, float]]]:
         """Collect successful sample indices per UID based on sequence-level reward threshold."""
         seq_scores = reward_tensor.sum(dim=-1).detach().to(torch.float32).cpu().numpy()
         uids = batch.non_tensor_batch["uid"]
-        success_by_uid: dict[Any, list[int]] = defaultdict(list)
+        success_by_uid: dict[Any, list[tuple[int, float]]] = defaultdict(list)
         for idx, uid in enumerate(uids):
             if seq_scores[idx] >= success_reward_threshold:
-                success_by_uid[uid].append(idx)
+                success_by_uid[uid].append((idx, seq_scores[idx]))
         return success_by_uid
 
     @staticmethod
@@ -538,19 +531,14 @@ class RayPPOTrainer:
         return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
 
     def _get_solution(
-        self,
-        idx: int,
-        success_by_uid: dict[Any, list[int]],
-        uids: list[Any],
-        response_texts: list[str],
-        dont_reprompt_on_self_success: bool = False,
-        remove_thinking_from_demonstration: bool = False,
+        self, idx: int, success_by_uid: dict[Any, list[tuple[int, float]]], uids: list[Any], response_texts: list[str],
+        dont_reprompt_on_self_success: bool = False, remove_thinking_from_demonstration: bool = False,
     ) -> Optional[str]:
         """Select a successful demonstration for one sample from its UID group."""
         uid = uids[idx]
-        solution_idxs = success_by_uid[uid]
+        solution_idxs_and_reward = sorted(success_by_uid[uid], key=lambda x: x[1], reverse=True)
         if dont_reprompt_on_self_success:
-            solution_idxs = [j for j in solution_idxs if j != idx]
+            solution_idxs = [j[0] for j in solution_idxs_and_reward if j[0] != idx]
         if len(solution_idxs) == 0:
             return None
         solution_idx = solution_idxs[0]
@@ -560,8 +548,7 @@ class RayPPOTrainer:
         return solution_str
 
     def _maybe_build_self_distillation_batch(
-        self, batch: DataProto, reward_tensor: torch.Tensor,
-        reward_extra_infos_dict: Optional[dict[str, list]] = None,
+        self, batch: DataProto, reward_tensor: torch.Tensor, reward_extra_infos_dict: Optional[dict[str, list]] = None
     ) -> Optional[tuple[DataProto, dict[str, float]]]:
         """Build SDPO teacher inputs and distillation masks when loss_mode is set to ``sdpo``."""
         self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
@@ -587,14 +574,10 @@ class RayPPOTrainer:
             reward_extra_infos_dict=reward_extra_infos_dict, batch_size=batch_size,
         )
 
-        success_by_uid = self._collect_solutions_by_uid(
-            batch, reward_tensor,
-            success_reward_threshold=self_distillation_cfg.success_reward_threshold,
-        )
+        success_by_uid = self._collect_solutions_by_uid(batch, reward_tensor, success_reward_threshold=self_distillation_cfg.success_reward_threshold)
         solution_strs = [
             self._get_solution(
-                i, success_by_uid, batch.non_tensor_batch["uid"],
-                response_texts, self_distillation_cfg.dont_reprompt_on_self_success,
+                i, success_by_uid, batch.non_tensor_batch["uid"], response_texts, self_distillation_cfg.dont_reprompt_on_self_success,
                 self_distillation_cfg.get("remove_thinking_from_demonstration", False),
             ) if not feedback_only_without_solution else None for i in range(batch_size)
         ]
@@ -687,10 +670,7 @@ class RayPPOTrainer:
 
         response_mask_dtype = teacher_prompt_attention_mask.dtype
         teacher_input_ids = torch.cat([teacher_prompt_input_ids.to(device), responses], dim=1)
-        teacher_attention_mask = torch.cat(
-            [teacher_prompt_attention_mask.to(device), response_mask.to(device, dtype=response_mask_dtype)],
-            dim=1,
-        )
+        teacher_attention_mask = torch.cat([teacher_prompt_attention_mask.to(device), response_mask.to(device, dtype=response_mask_dtype)], dim=1)
         teacher_position_ids = compute_position_id_with_mask(teacher_attention_mask)
         self_distillation_mask = torch.tensor(
             [solution_strs[i] is not None or feedback_list[i] is not None for i in range(batch_size)], dtype=torch.int32, device=device,
