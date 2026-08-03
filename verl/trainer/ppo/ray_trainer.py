@@ -72,6 +72,7 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import (left_right_2_no_padding,
                                         no_padding_2_padding)
+from verl.utils.torch_functional import pad_sequence_to_length
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -681,6 +682,9 @@ class RayPPOTrainer:
             if teacher_prompt_attention_mask is None:
                 teacher_prompt_attention_mask = torch.ones_like(teacher_prompt_input_ids, dtype=torch.long)
 
+        teacher_prompt_input_ids = pad_sequence_to_length(teacher_prompt_input_ids, self_distillation_cfg.max_reprompt_len, self.tokenizer.pad_token_id, left_pad=True)
+        teacher_prompt_attention_mask = pad_sequence_to_length(teacher_prompt_attention_mask, self_distillation_cfg.max_reprompt_len, 0, left_pad=True)
+
         response_mask_dtype = teacher_prompt_attention_mask.dtype
         teacher_input_ids = torch.cat([teacher_prompt_input_ids.to(device), responses], dim=1)
         teacher_attention_mask = torch.cat(
@@ -694,6 +698,11 @@ class RayPPOTrainer:
         if loss_mode == "srpo":
             is_correct_rollouts = reward_tensor.sum(dim=-1).detach().to(torch.float32) >= self_distillation_cfg.success_reward_threshold
             self_distillation_mask = ~is_correct_rollouts * self_distillation_mask
+
+        assert teacher_input_ids.shape[1] == self_distillation_cfg.max_reprompt_len + self.config.data.max_response_length, (
+            f"teacher input id length must same as max length: {self_distillation_cfg.max_reprompt_len + self.config.data.max_response_length}, "
+            f"Input size: {teacher_input_ids.shape}"
+        )
 
         unique_uids = set(batch.non_tensor_batch["uid"])
         num_with_feedback_used = sum(1 for i in range(batch_size) if feedback_list[i] is not None)

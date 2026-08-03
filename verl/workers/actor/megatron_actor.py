@@ -774,8 +774,8 @@ class MegatronPPOActor(BasePPOActor):
                     teacher_log_prob, teacher_full_log_prob = data["teacher_log_probs"], data.get("teacher_full_log_probs", None)
                     self_distillation_mask = data.get("self_distillation_mask", None)
 
-                    if teacher_log_prob is not None and output.get("topk_indices", None) is not None:
-                        teacher_full_log_prob = torch.gather(teacher_log_prob, dim=-1, index=output["topk_indices"])
+                    if full_log_prob is not None and output.get("topk_indices", None) is not None:
+                        teacher_full_log_prob = torch.gather(teacher_full_log_prob, dim=-1, index=output["topk_indices"])
 
                     loss_fn_kwargs.update({
                         "full_log_prob": full_log_prob, "teacher_log_prob": teacher_log_prob, "teacher_full_log_prob": teacher_full_log_prob,

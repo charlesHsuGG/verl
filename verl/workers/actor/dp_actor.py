@@ -297,8 +297,7 @@ class DataParallelPPOActor(BasePPOActor):
                 is_mask_all_zero = attention_mask.sum() == 0
                 if is_mask_all_zero:
                     input_ids_rmpad = torch.zeros(
-                        (1, self.ulysses_sequence_parallel_size),
-                        device=input_ids.device,
+                        (1, self.ulysses_sequence_parallel_size), device=input_ids.device,
                         dtype=input_ids.dtype,
                     )
                     if position_ids.dim() == 3:
@@ -745,8 +744,7 @@ class DataParallelPPOActor(BasePPOActor):
                     if self.teacher_module is self.actor_module:
                         raise ValueError("Trust-region teacher requires a separate reference teacher_module.")
                     trust_region_teacher = TrustRegionTeacher(
-                        teacher_module=self.teacher_module,
-                        student_module=self.actor_module,
+                        teacher_module=self.teacher_module, student_module=self.actor_module,
                         mix_coef=teacher_update_rate,
                     )
 
@@ -905,7 +903,7 @@ class DataParallelPPOActor(BasePPOActor):
                             "input_ids": model_inputs["teacher_input_ids"],
                             "attention_mask": model_inputs["teacher_attention_mask"],
                             "position_ids": model_inputs["teacher_position_ids"],
-                            "topk_indices": model_inputs.get("topk_indices", None),
+                            "topk_indices": outputs.get("topk_indices", None),
                         }
                         teacher_model = trust_region_teacher or self.teacher_module or self.actor_module
                         with torch.no_grad():
@@ -914,7 +912,6 @@ class DataParallelPPOActor(BasePPOActor):
                                 temperature=temperature,
                                 calculate_entropy=False,
                                 compute_full_log_probs=compute_full_log_probs,
-                                top_k_log_probs=self_distillation_cfg.distillation_topk if compute_full_log_probs else None
                             )
                         full_log_prob = outputs.get("full_log_probs", None)
                         teacher_log_prob, teacher_full_log_prob = teacher_outputs["log_probs"], teacher_outputs.get("full_log_probs", None)
