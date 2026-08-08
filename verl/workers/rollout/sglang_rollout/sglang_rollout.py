@@ -21,8 +21,10 @@ import os
 from typing import Generator
 
 import ray
+import sglang
 import sglang.srt.entrypoints.engine
 import torch
+from packaging import version
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
     assert_pkg_version,
@@ -62,19 +64,57 @@ def _set_envs_and_config(server_args: ServerArgs):
     # Set ulimit
     set_ulimit()
 
+    try:
+        sglang_version = sglang.__version__
+    except Exception:
+        import importlib.metadata
+
+        sglang_version = importlib.metadata.version("sglang")
+
     # Check flashinfer version
-    if server_args.attention_backend == "flashinfer":
-        assert_pkg_version(
-            "flashinfer_python",
-            "0.2.5",
-            "Please uninstall the old version and reinstall the latest version by following the instructions at https://docs.flashinfer.ai/installation.html.",
-        )
-    if is_cuda():
-        assert_pkg_version(
-            "sgl-kernel",
-            "0.1.1",
-            "Please reinstall the latest version with `pip install sgl-kernel --force-reinstall`",
-        )
+    if version.parse(sglang_version) >= version.parse("0.5.10"):
+        if server_args.attention_backend == "flashinfer":
+            assert_pkg_version(
+                "flashinfer_python",
+                "0.6.7.post2",
+                "Please uninstall the old version and "
+                "reinstall the latest version by following the instructions "
+                "at https://docs.flashinfer.ai/installation.html.",
+            )
+        if is_cuda():
+            assert_pkg_version(
+                "sglang-kernel",
+                "0.4.1",
+                "Please reinstall the latest version with `pip install sglang-kernel --force-reinstall`",
+            )
+    elif version.parse(sglang_version) >= version.parse("0.5.7"):
+        if server_args.attention_backend == "flashinfer":
+            assert_pkg_version(
+                "flashinfer_python",
+                "0.5.3",
+                "Please uninstall the old version and "
+                "reinstall the latest version by following the instructions "
+                "at https://docs.flashinfer.ai/installation.html.",
+            )
+        if is_cuda():
+            assert_pkg_version(
+                "sgl-kernel",
+                "0.3.20",
+                "Please reinstall the latest version with `pip install sgl-kernel --force-reinstall`",
+            )
+    else:
+        if server_args.attention_backend == "flashinfer":
+            assert_pkg_version(
+                "flashinfer_python",
+                "0.2.5",
+                "Please uninstall the old version and reinstall the latest version by following the instructions at https://docs.flashinfer.ai/installation.html.",
+            )
+        if is_cuda():
+            assert_pkg_version(
+                "sgl-kernel",
+                "0.1.1",
+                "Please reinstall the latest version with `pip install sgl-kernel --force-reinstall`",
+            )
 
     # Set mp start method
     mp.set_start_method("spawn", force=True)
