@@ -14,14 +14,76 @@
 # limitations under the License.
 
 import pickle
+from dataclasses import asdict
 from typing import Any, Iterator, Optional
 
 import numpy as np
 import torch
 import torch.distributed as dist
-
+from peft import LoraConfig
 from verl.utils.device import get_device_name
 from verl.workers.rollout.utils import ensure_async_iterator
+
+SGLANG_LORA_NAME = "verl_actor_lora_name"
+
+
+def sglang_lora_target_modules(target_modules: Any) -> list[str]:
+    """Render verl's ``model.target_modules`` as SGLang's ``lora_target_modules``.
+
+    Following PEFT, verl overloads this field by type: a list names modules matched
+    exactly or by suffix, while a bare string is either the ``"all-linear"`` shorthand
+    or a *regex* matched against the whole parameter key -- see
+    :func:`verl.utils.model.check_target_modules`, which dispatches on exactly that.
+
+    SGLang supports neither form. It normalizes the field with ``set(...)``, so a bare
+    string is torn into its characters and the LoRA memory pool later dies on one of
+    them::
+
+        NotImplementedError: get_hidden_dim not implemented for i
+
+    ``"all-linear"`` translates to SGLang's own ``"all"`` sentinel, which it expands
+    itself. A regex has no SGLang equivalent, and reading it as a literal module name
+    would silently adapt a different set of modules than training did, so it is
+    rejected with an actionable message instead.
+    """
+    if target_modules == "all-linear":
+        return ["all"]
+    if isinstance(target_modules, str):
+        raise ValueError(
+            f"SGLang cannot serve a regex `target_modules` ({target_modules!r}). PEFT matches a "
+            f"string against the full parameter key, which SGLang's LoRA pool has no equivalent "
+            f"of, and reading it as a literal module name would adapt different modules than "
+            f"training did. Use `all-linear`, or list the module names explicitly, e.g. "
+            f"[q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]."
+        )
+    return list(target_modules)
+
+
+def normalize_peft_config_for_sglang(peft_config: dict) -> dict:
+    """Normalize an engine's adapter config into what SGLang's adapter loader accepts.
+
+    ``BaseEngine.get_per_tensor_param`` declares this value ``Optional[dict]``, and the
+    FSDP engine honours that with ``LoraConfig.to_dict()`` -- which leaves ``task_type``
+    and ``peft_type`` as enum members rather than the strings the wire format needs, so
+    unwrap them. The input is not mutated.
+
+    The megatron engine returns a differently shaped dict: ``build_peft_config_for_vllm()``
+    carries no ``peft_type`` key at all. Rather than guess a value for a path that has not
+    been exercised, reject it with a message that says so. Nothing regresses -- that
+    combination cannot reach SGLang today either, since the caller crashes further up.
+    """
+    normalized = asdict(peft_config) if isinstance(peft_config, LoraConfig) else dict(peft_config)
+    for key in ("task_type", "peft_type"):
+        if key in normalized:
+            normalized[key] = getattr(normalized[key], "value", normalized[key])
+    if "peft_type" not in normalized:
+        raise ValueError(
+            "adapter config has no 'peft_type', which SGLang's adapter loader requires. "
+            "The megatron engine's build_peft_config_for_vllm() omits it; that pairing is "
+            "not covered by this code path. Keys present: " + ", ".join(sorted(normalized))
+        )
+    normalized["target_modules"] = sglang_lora_target_modules(normalized["target_modules"])
+    return normalized
 
 
 def broadcast_pyobj(

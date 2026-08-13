@@ -111,7 +111,7 @@ def _ulysses_flash_attention_forward(
     """
     ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
 
-    ########## AlltoAll for Ulysses ##########
+    # AlltoAll for Ulysses #
     # TODO: Disable sp for ViT, there's no elegent way to determine whether it's ViT or not.
     # Use `position_ids` as condition since ViT doesn't pass it to flash attention.
     if ulysses_sp_size > 1 and position_ids is not None:
@@ -145,7 +145,7 @@ def _ulysses_flash_attention_forward(
         query_states, key_states, value_states, attention_mask, query_length, *args, position_ids=position_ids, **kwargs
     )
 
-    ########## AlltoAll for Ulysses ##########
+    # AlltoAll for Ulysses #
     if ulysses_sp_size > 1 and position_ids is not None:
         # (bsz, seq_len, n_head/n, head_dim) -> (bsz, seq_len/n, n_head, head_dim)
         attn_output = gather_heads_scatter_seq(attn_output, seq_dim=1, head_dim=2)

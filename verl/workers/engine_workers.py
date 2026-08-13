@@ -133,7 +133,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         self.loss_fn = None
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def to(self, device, model=True, optimizer=True, grad=True):
         """Manual control of load/offload"""
         assert device in ["cpu", "device"]
@@ -143,11 +143,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         self.engine.to(device=device, model=model, optimizer=optimizer, grad=grad)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def set_loss_fn(self, loss_fn):
         self.loss_fn = loss_fn
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def reset(self):
         """
         Reset the model engine to the initial state. If the engine is not initialized,
@@ -398,11 +398,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         return final_output
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         return self.engine.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
@@ -451,16 +451,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
         )
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def set_loss_fn(self, loss_fn):
         self.actor.set_loss_fn(loss_fn=loss_fn)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def to(self, device, model=True, optimizer=True, grad=True):
         """Manual control of load/offload"""
         self.actor.to(device=device, model=model, optimizer=optimizer, grad=grad)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def init_model(self):
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
 
@@ -569,7 +569,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
             )
 
-            # used for LoRA
+            # used for LoRA (base_sync_done is unused in merge-only mode but kept for Phase 2 adapter path)
             self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
@@ -609,17 +609,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert "actor" in self.role, "load_checkpoint only support actor role"
         self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)  # pylint: disable=no-member
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)  # pylint: disable=no-member
     async def update_weights(self, global_steps: int = None):
         """Update weights from trainer to rollout.
 
@@ -627,6 +627,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
            - before update_weights: rollout should be in sleep mode.
            - after update_weights: rollout should be in wake_up mode.
         2. For async training with disaggregated trainer and rollout, send_weights only by checkpoint engine.
+
+        LoRA handling: when model.lora.merge=True (peft_merge), LoRA is merged into
+        base weights before sync. The engine returns full HF-keyed params with
+        peft_config=None, so the rollout receives a standard weight update.
         """
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
@@ -638,12 +642,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         set_expandable_segments(False)
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
-        # 1. resume weights and update weights
+        # 1. resume rollout memory (weights were released during sleep)
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
-        # 2. get per tensor generator from engine, this will load model to gpu
+        # 2. get per tensor params from engine, this will load model to gpu
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
             layered_summon=self.layered_summon, base_sync_done=True
         )
@@ -683,7 +687,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.base_sync_done = True
         set_expandable_segments(True)
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
+    @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)  # pylint: disable=no-member
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
         """Execute checkpoint engine method.
 

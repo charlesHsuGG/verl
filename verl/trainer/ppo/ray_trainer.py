@@ -282,7 +282,7 @@ class RayPPOTrainer:
         bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
 
         with open_dict(policy_loss_config):
-            if config.actor_rollout_ref.actor.ppo_epochs == 1 and (
+            if config.algorithm.adv_estimator in ("opo", AdvantageEstimator.OPO) and config.actor_rollout_ref.actor.ppo_epochs == 1 and (
                 config.actor_rollout_ref.actor.override_ppo_mini_batch_num == 1 or config.actor_rollout_ref.actor.ppo_mini_batch_size == config.data.train_batch_size
             ):
                 policy_loss_config["is_on_policy"] = True
@@ -537,8 +537,9 @@ class RayPPOTrainer:
         """Select a successful demonstration for one sample from its UID group."""
         uid = uids[idx]
         solution_idxs_and_reward = sorted(success_by_uid[uid], key=lambda x: x[1], reverse=True)
+        solution_idxs = [j[0] for j in solution_idxs_and_reward]
         if dont_reprompt_on_self_success:
-            solution_idxs = [j[0] for j in solution_idxs_and_reward if j[0] != idx]
+            solution_idxs = [j for j in solution_idxs if j != idx]
         if len(solution_idxs) == 0:
             return None
         solution_idx = solution_idxs[0]

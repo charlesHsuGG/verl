@@ -43,6 +43,7 @@ from verl.workers.rollout.replica import (RolloutMode, RolloutReplica,
 from verl.workers.rollout.sglang_rollout.sglang_rollout import \
     _set_envs_and_config
 from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME, sglang_lora_target_modules
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -206,6 +207,16 @@ class SGLangHttpServer:
             **engine_kwargs,
         }
 
+        # update lora-related args
+        if self.model_config.lora_rank > 0:
+            args.update(
+                {
+                    "enable_lora": True,
+                    "max_lora_rank": self.model_config.lora_rank,
+                    "lora_target_modules": sglang_lora_target_modules(self.model_config.target_modules),
+                }
+            )
+
         # Only set dist_init_addr for multi-node; for single-node, let SGLang
         # handle port selection internally via nccl_port to avoid conflicts.
         if self.nnodes > 1:
@@ -230,7 +241,7 @@ class SGLangHttpServer:
 
         # enable_weights_cpu_backup is supported in sglang>=0.5.3
         if "enable_weights_cpu_backup" in [f.name for f in dataclasses.fields(ServerArgs)]:
-            enable_weights_cpu_backup = True if self.rollout_mode == RolloutMode.COLOCATED else False
+            enable_weights_cpu_backup = True if self.rollout_mode == RolloutMode.COLOCATED or self.model_config.lora_rank > 0 else False
             args["enable_weights_cpu_backup"] = enable_weights_cpu_backup
 
         if self.config.enable_rollout_routing_replay:
@@ -357,7 +368,7 @@ class SGLangHttpServer:
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
-        max_possible_tokens = self.config.max_model_len - len(prompt_ids)
+        max_possible_tokens = self.config.max_model_len - len(prompt_ids) - 1
 
         if max_possible_tokens < 0:
             raise ValueError(
@@ -400,6 +411,10 @@ class SGLangHttpServer:
             request.update({"return_routed_experts": True})
 
         generate_request = GenerateReqInput(**request)
+
+        # Add lora request
+        if self.model_config.lora_rank > 0:
+            generate_request.lora_path = SGLANG_LORA_NAME
 
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
         finish_reason = output["meta_info"]["finish_reason"]

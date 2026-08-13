@@ -302,7 +302,7 @@ def parallel_load_safetensors(filepath):
     ckpt_chunks = sorted(safetensors2param.keys())
     world_size = dist.get_world_size()
     size = int(math.ceil(total_files / world_size))
-    ckpt_chunks = [ckpt_chunks[rank * size : rank * size + size] for rank in range(world_size)]
+    ckpt_chunks = [ckpt_chunks[rank * size: rank * size + size] for rank in range(world_size)]
 
     shard_states = {}
     device = get_device_id()
@@ -551,6 +551,9 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
 
+    if isinstance(fsdp_transformer_layer_cls_to_wrap, set):
+        fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
+
     fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap) if fsdp_transformer_layer_cls_to_wrap is not None else []
 
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
@@ -574,9 +577,9 @@ def get_shard_placement_fn(fsdp_size):
 
     def shard_placement_fn(param):
         shape = list(param.shape)
-        for i in range(len(shape)):
-            if shape[i] % fsdp_size == 0:
-                return Shard(i)
+        for i, sh in enumerate(shape):
+            if sh % fsdp_size == 0:
+                return Shard(i)  # pylint: disable=possibly-used-before-assignment
         return Shard(0)
 
     return shard_placement_fn
@@ -604,7 +607,7 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
 
     def __prefix_submodules(module, prefix):
         for name, submodule in module.named_modules():
-            if name.startswith(prefix) and "." not in name[len(prefix) :]:
+            if name.startswith(prefix) and "." not in name[len(prefix):]:
                 yield name, submodule
 
     lora_params = OrderedDict()
@@ -639,6 +642,94 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
                     submodule._is_root = False
                 get_torch_device().empty_cache()
     return lora_params
+
+
+def collect_merged_lora_params(module: nn.Module) -> OrderedDict:
+    """Merge LoRA into base weights and extract full state dict with HF key names.
+
+    For rollout backends (e.g. SGLang) whose load_weights() expects standard
+    HuggingFace parameter names and handles QKV/gate_up fusion internally.
+    Sending LoRA delta keys to these backends fails with KeyError.
+
+    This function:
+    1. Merges LoRA adapters into base weights (layer-by-layer for FSDP2)
+    2. Extracts the full merged state dict with clean HF key names
+    3. Unmerges LoRA adapters to restore training state
+
+    For FSDP2, extraction is done layer-by-layer to avoid OOM from
+    all-gathering the entire model at once.
+
+    Args:
+        module: The FSDP-wrapped PeftModel to extract merged weights from.
+
+    Returns:
+        OrderedDict mapping HF parameter names to CPU tensors.
+    """
+    ver = fsdp_version(module)
+    assert ver in [1, 2], f"collect_merged_lora_params requires FSDP module, got version {ver}"
+
+    merged_params = OrderedDict()
+    peft_model = getattr(module, "_fsdp_wrapped_module", module)
+
+    from peft.tuners.lora import LoraLayer
+
+    def _backup_base_weights(mod):
+        """Clone base weights of LoRA target modules before merge."""
+        backups = {}
+        for mname, m in mod.named_modules():
+            if isinstance(m, LoraLayer):
+                base = m.get_base_layer()
+                backups[mname] = base.weight.data.clone()
+        return backups
+
+    def _restore_base_weights(mod, backups):
+        """Restore base weights from backup, avoiding merge/unmerge drift."""
+        for mname, m in mod.named_modules():
+            if isinstance(m, LoraLayer) and mname in backups:
+                base = m.get_base_layer()
+                base.weight.data.copy_(backups[mname])
+        _clean_merged_lora_(mod)
+
+    def _clean_key(key):
+        key = key.replace("_fsdp_wrapped_module.", "")
+        key = key.replace("base_model.model.", "")
+        key = key.replace(".base_layer", "")
+        return key
+
+    if ver == 1:
+        with FSDP.summon_full_params(module, writeback=True, with_grads=False):
+            backups = _backup_base_weights(module)
+            _merge_or_unmerge_lora_(module, merge=True)
+            model = peft_model.base_model.model
+            for name, param in model.state_dict().items():
+                if any(x in name for x in ["_flat_param", "lora_"]):
+                    continue
+                name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
+                merged_params[name] = (
+                    param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+                )
+            _restore_base_weights(module, backups)
+        get_torch_device().empty_cache()
+    else:
+        # FSDP2: backup sharded weights, merge per-leaf, extract via full_tensor(), restore.
+        # We use backup_base_model_weights (which works with DTensor shards) instead of
+        # extracting inside summon_full_params, because submodule.state_dict() inside summon
+        # can return local shards instead of full tensors for some parameters.
+        base_weights_backup = backup_base_model_weights(module)
+        fsdp_merge_unmerge(module, do_merge=True)
+
+        for pname, param in module.named_parameters():
+            if any(x in pname for x in ["_flat_param", "lora_"]):
+                continue
+            clean_key = _clean_key(pname)
+            val = param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+            merged_params[clean_key] = val
+
+        restore_base_model_weights(module, base_weights_backup)
+        _clean_merged_lora_(module)
+        get_torch_device().empty_cache()
+
+    return merged_params
 
 
 def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool) -> OrderedDict:
@@ -756,7 +847,7 @@ def set_reshard_after_forward(module: FSDPModule, reshard_after_forward: bool, r
             state = module._get_fsdp_state()
             state._auto_reshard_after_forward = False
             if fsdp_param_group := state._fsdp_param_group:
-                fsdp_param_group.post_forward_mesh_info = _get_post_forward_mesh_info(
+                fsdp_param_group.post_forward_mesh_info = _get_post_forward_mesh_info(  # pylint: disable=possibly-used-before-assignment
                     reshard_after_forward, fsdp_param_group.mesh_info
                 )
 
@@ -926,7 +1017,7 @@ def merged_lora_context(actor, backup_adapters=False):
 
 def fsdp2_sharded_save_to_cpu(
     model: torch.nn.Module,
-) -> tuple[dict[str, tuple[torch.Tensor, DTensorSpec]], DTensorSpec]:
+) -> tuple[dict[str, tuple[torch.Tensor, DTensorSpec]], DTensorSpec]:  # pylint: disable=possibly-used-before-assignment
     """
     Sharded Save: Each process only saves the local DTensor shard from its own GPU to CPU memory.
 
@@ -943,7 +1034,7 @@ def fsdp2_sharded_save_to_cpu(
 
     for param_name, param in model.named_parameters():
         # Only process sharded parameters of DTensor type (core parameters of FSDP2)
-        if not isinstance(param, DTensor):
+        if not isinstance(param, DTensor):  # pylint: disable=possibly-used-before-assignment
             # Save non-sharded parameters (e.g., running_mean of BatchNorm) as local data
             cpu_tensor = param.detach().cpu()
             cpu_sharded_state[param_name] = (cpu_tensor, None)
