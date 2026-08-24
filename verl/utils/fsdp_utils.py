@@ -767,8 +767,8 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
     collect lora params or full params if base model is not ready in vllm
     work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
     """
-    print(f"collect_lora_params: layered_summon={layered_summon}, base_sync_done={base_sync_done}")
-    print(f"collect_lora_params: module device={next(module.parameters()).device}, fsdp_version={fsdp_version(module)}")
+    # print(f"collect_lora_params: layered_summon={layered_summon}, base_sync_done={base_sync_done}")
+    # print(f"collect_lora_params: module device={next(module.parameters()).device}, fsdp_version={fsdp_version(module)}")
     lora_params = OrderedDict()
     peft_model = getattr(module, "_fsdp_wrapped_module", module)
     if fsdp_version(module) > 0:

@@ -766,9 +766,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         """Context switch hybridengine to rollout mode."""
         aggressive_empty_cache(force_sync=True)
 
-        print("uses_fsdp2_cpu_offload_policy:", self._uses_fsdp2_cpu_offload_policy)
-        print("is_offload_param:", self._is_offload_param)
-        print("actor module device:", next(self.actor_module_fsdp.parameters()).device)
+        # print("uses_fsdp2_cpu_offload_policy:", self._uses_fsdp2_cpu_offload_policy)
+        # print("is_offload_param:", self._is_offload_param)
+        # print("actor module device:", next(self.actor_module_fsdp.parameters()).device)
 
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
         if self._is_offload_param and not self._uses_fsdp2_cpu_offload_policy:
