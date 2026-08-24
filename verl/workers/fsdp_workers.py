@@ -1254,7 +1254,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 peft_config["target_modules"] = list(peft_config["target_modules"])
             try:
                 if fsdp_version(self.actor_module_fsdp) > 0:
-                    # self.actor_module_fsdp = self.actor_module_fsdp.to(get_device_name())
+                    if fsdp_version(self.actor_module_fsdp) == 1:
+                        self.actor_module_fsdp = self.actor_module_fsdp.to(get_device_name())
                     lora_params = layered_summon_lora_params(self.actor_module_fsdp)
                     if dist.get_rank() == 0:
                         save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
