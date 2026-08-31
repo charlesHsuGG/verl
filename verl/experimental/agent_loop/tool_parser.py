@@ -19,7 +19,6 @@ from typing import Any, Optional
 
 import regex
 from pydantic import BaseModel
-
 from verl.tools.schemas import OpenAIFunctionToolSchema
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.rollout_trace import rollout_trace_op
@@ -280,13 +279,13 @@ class Qwen3XMLToolParser(ToolParser):
         end_index = function_call_str.index(">")
         function_name = function_call_str[:end_index]
         param_config = get_arguments_config(function_name)
-        parameters = function_call_str[end_index + 1 :]
+        parameters = function_call_str[end_index + 1:]
         param_dict = {}
         for match in self.tool_call_parameter_regex.findall(parameters):
             match_text = match[0] if match[0] else match[1]
             idx = match_text.index(">")
             param_name = match_text[:idx]
-            param_value = str(match_text[idx + 1 :])
+            param_value = str(match_text[idx + 1:])
             # Remove prefix and trailing \n
             if param_value.startswith("\n"):
                 param_value = param_value[1:]

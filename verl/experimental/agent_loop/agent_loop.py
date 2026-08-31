@@ -29,21 +29,19 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
-
-from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
+from verl.experimental.agent_loop.prometheus_utils import \
+    update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
-from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
+from verl.utils.chat_template import (apply_chat_template,
+                                      initialize_system_prompt)
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.ray_utils import auto_await, get_event_loop
-from verl.utils.rollout_trace import (
-    RolloutTraceConfig,
-    rollout_trace_attr,
-    rollout_trace_op,
-)
+from verl.utils.rollout_trace import (RolloutTraceConfig, rollout_trace_attr,
+                                      rollout_trace_op)
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
@@ -352,7 +350,7 @@ class AgentLoopBase(ABC):
             prompt_ids = normalize_token_ids(tokenized_prompt)
 
         if remove_system_prompt:
-            prompt_ids = prompt_ids[len(self.system_prompt) :]
+            prompt_ids = prompt_ids[len(self.system_prompt):]
 
         return prompt_ids
 

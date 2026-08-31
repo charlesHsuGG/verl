@@ -21,16 +21,13 @@ from uuid import uuid4
 
 import torch
 from PIL import Image
-
-from verl.experimental.agent_loop.agent_loop import (
-    AgentLoopBase,
-    AgentLoopOutput,
-    register,
-)
+from verl.experimental.agent_loop.agent_loop import (AgentLoopBase,
+                                                     AgentLoopOutput, register)
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.experimental.agent_loop.utils import build_gpt_oss_tool_response_text
 from verl.interactions.base import BaseInteraction
-from verl.interactions.utils.interaction_registry import initialize_interactions_from_config
+from verl.interactions.utils.interaction_registry import \
+    initialize_interactions_from_config
 from verl.tools.schemas import ToolResponse
 from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.profiler import simple_timer
@@ -176,7 +173,7 @@ class ToolAgentLoop(AgentLoopBase):
                 state = AgentState.TERMINATED
 
         # Finalize output
-        response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
+        response_ids = agent_data.prompt_ids[-len(agent_data.response_mask):]
         prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
         multi_modal_data = {}
         if agent_data.image_data is not None:
@@ -451,7 +448,7 @@ class ToolAgentLoop(AgentLoopBase):
             if self.tool_response_truncate_side == "left":
                 tool_response_text = tool_response_text[: self.max_tool_response_length] + "...(truncated)"
             elif self.tool_response_truncate_side == "right":
-                tool_response_text = "(truncated)..." + tool_response_text[-self.max_tool_response_length :]
+                tool_response_text = "(truncated)..." + tool_response_text[-self.max_tool_response_length:]
             else:
                 length = self.max_tool_response_length // 2
                 tool_response_text = tool_response_text[:length] + "...(truncated)..." + tool_response_text[-length:]

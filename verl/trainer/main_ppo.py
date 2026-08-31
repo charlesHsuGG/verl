@@ -142,6 +142,10 @@ class TaskRunner:
         self_distillation_cfg = config.actor_rollout_ref.actor.get("self_distillation", None)
         loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
         enable_self_distillation = self_distillation_cfg is not None and loss_mode in SUPPORT_SELF_DISTILL_LOSS_MODE
+        rollout_corr_config = config.algorithm.get("rollout_correction", None) or config.actor_rollout_ref.actor.policy_loss.get("rollout_correction", None)
+        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+        if enable_self_distillation and bypass_recomputing_logprobs:
+            raise ValueError("SDPO cannot use bypass mode in rollout correction.")
         if enable_self_distillation and need_reference_policy(config):
             raise ValueError("SDPO cannot share the reference policy with KL regularization.")
         if enable_self_distillation and use_legacy_worker_impl == "disable":

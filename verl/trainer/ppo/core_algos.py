@@ -1826,6 +1826,7 @@ def compute_policy_loss_clip_cov(
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
         "actor/ppo_kl": ppo_kl.detach().item(),
     }
+
     return pg_loss, pg_metrics
 
 
@@ -2338,7 +2339,7 @@ def compute_policy_loss_reinforce(
     return pg_loss, pg_metrics
 
 
-@register_policy_loss("bypass_mode")
+@register_policy_loss("bypass_mode")  # type: ignore[arg-type]
 def compute_policy_loss_bypass_mode(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
@@ -2468,7 +2469,6 @@ def compute_policy_loss_bypass_mode(
             config=config,
             rollout_is_weights=None,  # Explicitly None - no IS weights for PPO-clip
         )
-
     else:
         raise ValueError(f"Invalid loss_type: {loss_type}. Must be 'reinforce' or 'ppo_clip'.")
 

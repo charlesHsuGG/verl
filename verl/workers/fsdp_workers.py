@@ -191,7 +191,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
         self._lora_rank = self.config.model.get("lora_rank", 0)
         self._is_lora = self.config.model.get("lora_adapter_path") is not None or self._lora_rank > 0
-        self._uses_fsdp2_cpu_offload_policy = False
 
         self.role = role
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
@@ -630,7 +629,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 cpu_offload = CPUOffloadPolicy(pin_memory=True)
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
-                self._uses_fsdp2_cpu_offload_policy = True
             else:
                 cpu_offload = None if role == "actor" else CPUOffloadPolicy(pin_memory=True)
 
@@ -766,12 +764,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         """Context switch hybridengine to rollout mode."""
         aggressive_empty_cache(force_sync=True)
 
-        # print("uses_fsdp2_cpu_offload_policy:", self._uses_fsdp2_cpu_offload_policy)
-        # print("is_offload_param:", self._is_offload_param)
-        # print("actor module device:", next(self.actor_module_fsdp.parameters()).device)
-
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
-        if self._is_offload_param and not self._uses_fsdp2_cpu_offload_policy:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
@@ -1046,7 +1040,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: DataProto):
         assert self._is_actor
-        if self._is_offload_param and not self._uses_fsdp2_cpu_offload_policy:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id())
@@ -1144,7 +1138,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
         assert self._is_actor
-        if self._is_offload_param and not self._uses_fsdp2_cpu_offload_policy:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         # Support all hardwares
@@ -1231,10 +1225,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # only support save and load ckpt for actor
         assert self._is_actor
 
-        origin_module_device = next(self.actor_module_fsdp.parameters()).device.type
-        if (self._is_offload_param or origin_module_device == "cpu") and not getattr(
-            self, "_uses_fsdp2_cpu_offload_policy", False
-        ):
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         self.checkpoint_manager.save_checkpoint(
@@ -1292,7 +1283,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 offload_fsdp_optimizer(self.actor_optimizer)
             return
 
-        if self._is_offload_param and not self._uses_fsdp2_cpu_offload_policy:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         self.checkpoint_manager.load_checkpoint(
@@ -1413,7 +1404,6 @@ class CriticWorker(Worker, DistProfilerExtension):
             self.config.model.get("lora_adapter_path") is not None or self.config.model.get("lora_rank", 0) > 0
         )
         self.use_orig_params = self.config.model.fsdp_config.get("use_orig_params", False)
-        self._uses_fsdp2_cpu_offload_policy = False
 
     def _build_critic_model_optimizer(self, config: FSDPCriticConfig):
         # the following line is necessary
@@ -1543,19 +1533,6 @@ class CriticWorker(Worker, DistProfilerExtension):
                 }
                 critic_module = get_peft_model(critic_module, LoraConfig(**lora_config))
 
-                # FSDP requires all params in a flat group to share dtype: cast a
-                # fp32 adapter to the bf16 base dtype only when they actually differ.
-                base_dtype = next((p.dtype for p in critic_module.parameters() if not p.requires_grad), None)
-                if base_dtype is not None:
-                    mismatched = [p for p in critic_module.parameters() if p.requires_grad and p.dtype != base_dtype]
-                    if mismatched:
-                        logger.info(
-                            f"Casting {len(mismatched)} LoRA adapter params from "
-                            f"{mismatched[0].dtype} to {base_dtype} to match base."
-                        )
-                        for param in mismatched:
-                            param.data = param.data.to(base_dtype)
-
         if self.rank == 0:
             print_model_size(critic_module)
 
@@ -1622,7 +1599,6 @@ class CriticWorker(Worker, DistProfilerExtension):
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
                 offload_policy = CPUOffloadPolicy(pin_memory=True)
-                self._uses_fsdp2_cpu_offload_policy = True
 
             fsdp_kwargs = {
                 "mesh": fsdp_mesh,
@@ -1713,7 +1689,7 @@ class CriticWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="critic"))
     @DistProfiler.annotate(color="cyan", role="compute_values")
     def compute_values(self, data: DataProto):
-        if self._is_offload_param and not self._uses_fsdp2_cpu_offload_policy:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
         micro_batch_size = self.config.forward_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
@@ -1733,7 +1709,7 @@ class CriticWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="critic"))
     @DistProfiler.annotate(color="pink", role="critic_update")
     def update_critic(self, data: DataProto):
-        if self._is_offload_param and not self._uses_fsdp2_cpu_offload_policy:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
         if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=get_device_id())
@@ -1768,10 +1744,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         """
         Save FSDP checkpoint, handling parameter offload as needed.
         """
-        origin_module_device = next(self.critic_module.parameters()).device.type
-        if (self._is_offload_param or origin_module_device == "cpu") and not getattr(
-            self, "_uses_fsdp2_cpu_offload_policy", False
-        ):
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
 
         self.checkpoint_manager.save_checkpoint(
@@ -1786,7 +1759,7 @@ class CriticWorker(Worker, DistProfilerExtension):
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=True):
         import torch
 
-        if self._is_offload_param and not self._uses_fsdp2_cpu_offload_policy:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
 
         self.checkpoint_manager.load_checkpoint(
