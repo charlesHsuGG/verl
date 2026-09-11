@@ -31,23 +31,28 @@ from peft.utils.save_and_load import get_peft_model_state_dict
 from torch.distributed import DeviceMesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._runtime_utils import _lazy_init
-from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
+from torch.distributed.fsdp.wrap import (size_based_auto_wrap_policy,
+                                         transformer_auto_wrap_policy)
 from transformers.trainer_pt_utils import get_module_class_from_name
-
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.model import check_exclude_modules, check_target_modules
 
 logger = logging.getLogger(__name__)
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
-    from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
-    from torch.distributed.fsdp._fully_shard._fsdp_init import _get_post_forward_mesh_info
+    from torch.distributed.fsdp import (CPUOffloadPolicy, FSDPModule,
+                                        MixedPrecisionPolicy, fully_shard)
+    from torch.distributed.fsdp._fully_shard._fsdp_init import \
+        _get_post_forward_mesh_info
     from torch.distributed.tensor import DTensor, Shard
     from torch.distributed.tensor._dtensor_spec import DTensorSpec
 
     fully_shard_module = torch.distributed.fsdp._fully_shard._fully_shard
 elif version.parse(torch.__version__) >= version.parse("2.4"):
-    from torch.distributed._composable.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
+    from torch.distributed._composable.fsdp import (CPUOffloadPolicy,
+                                                    FSDPModule,
+                                                    MixedPrecisionPolicy,
+                                                    fully_shard)
 
     fully_shard_module = torch.distributed._composable.fsdp
 else:
@@ -474,7 +479,8 @@ def get_fsdp_full_state_dict(model: torch.nn.Module, offload_to_cpu: bool = True
             state_dict = model.state_dict()
         return state_dict
     elif fsdp_version(model) == 2 or fsdp_version(model) == 0:
-        from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+        from torch.distributed.checkpoint.state_dict import (
+            StateDictOptions, get_model_state_dict)
 
         state_dict_config = StateDictOptions(
             full_state_dict=True, cpu_offload=offload_to_cpu, broadcast_from_rank0=not rank0_only
@@ -496,11 +502,13 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
     """
 
     if version.parse(torch.__version__) >= version.parse("2.7.0"):
-        from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+        from torch.distributed.checkpoint.state_dict import (
+            StateDictOptions, set_model_state_dict)
     else:
         # official torch 2.6.0 set_model_state_dict API leads to OOM
         # use torch 2.7.0 copy from verl/third_party/torch/distributed/checkpoint
-        from verl.third_party.torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+        from verl.third_party.torch.distributed.checkpoint.state_dict import (
+            StateDictOptions, set_model_state_dict)
 
     # To broadcast, it needs to be instantiated in the GPU.
     if dist.get_rank() == 0:
@@ -546,17 +554,20 @@ def maybe_patch_fsdp_module(model):
         fully_shard_module.FSDPModule = orig_fsdp_module
 
 
-def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap):
+def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap, *, use_fused_kernels=False):
     """Select modules to wrap individually with fully_shard in FSDP2.
 
     Matches transformer layers by class name, and embed_tokens/lm_head by name
     (with isinstance fallback). Name-based matching is needed because peft wraps
     embed_tokens in ModulesToSaveWrapper, breaking isinstance(module, nn.Embedding).
     When tie_word_embeddings is True, embed_tokens and lm_head share weights and
-    must not be wrapped separately.
+    must not be wrapped separately. Fused forwards access lm_head.weight directly,
+    so an untied lm_head remains in the root FSDP unit that owns its forward lifecycle.
     """
     _tie = getattr(model.config, "tie_word_embeddings", False)
-    _wrap_by_name = set() if _tie else {"embed_tokens", "lm_head"}
+    _wrap_by_name = set() if _tie else {"embed_tokens"}
+    if not _tie and not use_fused_kernels:
+        _wrap_by_name.add("lm_head")
 
     modules = []
     for name, module in model.named_modules():
@@ -586,7 +597,11 @@ def apply_fsdp2(model, fsdp_kwargs, config):
         fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
-    modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
+    modules = _select_fsdp2_wrap_targets(
+        model,
+        fsdp_transformer_layer_cls_to_wrap,
+        use_fused_kernels=config.get("use_fused_kernels", False),
+    )
 
     for idx, module in enumerate(modules):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
@@ -608,7 +623,7 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     if config.get("forward_prefetch", False):
         fsdp_modules = [m for m in modules if isinstance(m, FSDPModule)]
         for i, m in enumerate(fsdp_modules):
-            next_targets = fsdp_modules[i + 1 : i + 2]  # depth=1, mirrors FSDP1's forward_prefetch_limit=1
+            next_targets = fsdp_modules[i + 1: i + 2]  # depth=1, mirrors FSDP1's forward_prefetch_limit=1
             if next_targets and hasattr(m, "set_modules_to_forward_prefetch"):
                 m.set_modules_to_forward_prefetch(next_targets)
 
@@ -628,7 +643,8 @@ def get_shard_placement_fn(fsdp_size):
 
 def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinite=False, foreach=None):
     """torch.nn.utils.clip_grad_norm_ cann't run on cpu parameter DTensor"""
-    from torch.nn.utils.clip_grad import _clip_grads_with_norm_, _get_total_norm
+    from torch.nn.utils.clip_grad import (_clip_grads_with_norm_,
+                                          _get_total_norm)
 
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
