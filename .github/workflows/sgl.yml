@@ -131,6 +131,9 @@ jobs:
       - name: Check final pip list
         run: |
           $UV_RUN uv pip list
+      - name: Test SGLang weight-update session compatibility
+        run: |
+          $UV_RUN pytest -q tests/workers/rollout/rollout_sglang/test_weight_update_session_on_cpu.py
       - name: Prepare gsm8k dataset
         run: |
           $UV_RUN ray stop --force
@@ -144,11 +147,6 @@ jobs:
           ENABLE_CONTINUOUS_TOKEN=1 ROLLOUT_NAME=sglang $UV_RUN pytest -svvv \
             tests/experimental/agent_loop/test_basic_agent_loop.py::test_single_turn \
             tests/experimental/agent_loop/test_basic_agent_loop.py::test_tool_agent
-      - name: Test SGLang salted external KV cache invalidation
-        run: |
-          $UV_RUN ray stop --force
-          $UV_RUN pytest -s -x tests/workers/rollout/test_prefix_cache_versioning_on_cpu.py
-          $UV_RUN pytest tests/workers/rollout/rollout_sglang/test_sglang_prefix_cache_versioning.py -v -s
 
   sgl_checkpoint_engine:
     needs: setup

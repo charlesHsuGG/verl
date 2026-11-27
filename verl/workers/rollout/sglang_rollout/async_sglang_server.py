@@ -199,6 +199,8 @@ class SGLangHttpServer:
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
+        # Set in launch_server; ServerAdapter fetches it via get_admin_api_key().
+        self._admin_api_key: Optional[str] = None
 
         # used for controlling sglang server profiler
         profiler_config = self.config.profiler
@@ -246,6 +248,10 @@ class SGLangHttpServer:
         """Get http server address and port."""
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
+
+    def get_admin_api_key(self) -> Optional[str]:
+        """Admin API key the http server was started with; None on SGLang without one."""
+        return self._admin_api_key
 
     async def set_pd_peer(self, decode_peers: list, bootstrap_host: str):
         assert isinstance(decode_peers, list) and decode_peers
@@ -433,6 +439,14 @@ class SGLangHttpServer:
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+        # Newer SGLang refuses its admin routes (release/resume memory, weight updates, LoRA
+        # loading, ...) with 403 unless the server has an admin API key, and ServerAdapter drives
+        # exactly those routes over HTTP. Keep a configured key (engine_kwargs.sglang.admin_api_key
+        # or SGLANG_ADMIN_API_KEY), otherwise generate one per server.
+        if hasattr(ServerArgs, "admin_api_key"):
+            if not args.get("admin_api_key"):
+                args["admin_api_key"] = os.environ.get("SGLANG_ADMIN_API_KEY") or secrets.token_urlsafe(32)
+            self._admin_api_key = args["admin_api_key"]
         server_args = ServerArgs(**args)
         self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
             server_args=server_args,

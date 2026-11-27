@@ -24,9 +24,9 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
-    Qwen3_5CausalLMOutputWithPast,
     Qwen3_5ForConditionalGeneration,
 )
+from transformers.modeling_outputs import MultimodalCausalLMOutputWithPast
 
 from verl.utils.ulysses import (
     get_ulysses_sequence_parallel_group,
@@ -552,7 +552,7 @@ def qwen3_5_base_forward(
 
 
 @dataclass
-class Qwen3_5CausalLMOutputForPPO(Qwen3_5CausalLMOutputWithPast):
+class Qwen3_5CausalLMOutputForPPO(MultimodalCausalLMOutputWithPast):
     log_probs: Optional[torch.FloatTensor] = None
     topk_log_probs: Optional[torch.FloatTensor] = None
     entropy: Optional[torch.FloatTensor] = None

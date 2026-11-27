@@ -60,6 +60,11 @@ from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
 
+try:
+    from sglang.srt.utils.auth import AUTH_LEVELS as _SGLANG_AUTH_LEVELS
+except ImportError:  # SGLang without the per-route auth table
+    _SGLANG_AUTH_LEVELS = {}
+
 # Configure logger
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -70,6 +75,26 @@ DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY = 2.0
 DEFAULT_MAX_CONNECTIONS = 2000
 DEFAULT_MAX_WAIT_TIME = 300.0
+
+
+def _auth_headers(server_args: ServerArgs, endpoint: str) -> dict[str, str]:
+    """The bearer header SGLang's auth middleware accepts for ``endpoint``.
+
+    Admin-level routes (memory release/resume, weight updates, LoRA, flush_cache, abort, ...)
+    take ``admin_api_key`` when the server has one, else ``api_key``; the rest take ``api_key``.
+    Newer SGLang refuses admin-level ``admin_force`` routes with 403 unless the server was
+    started with ``admin_api_key``.
+    """
+    admin_api_key = getattr(server_args, "admin_api_key", None)
+    api_key = getattr(server_args, "api_key", None)
+    if _SGLANG_AUTH_LEVELS:
+        is_admin_route = _SGLANG_AUTH_LEVELS.get("/" + endpoint.lstrip("/"), "normal") != "normal"
+    else:
+        # No route table to consult: send the admin key everywhere, which normal routes
+        # also accept as long as the server has no api_key.
+        is_admin_route = True
+    key = (admin_api_key or api_key) if is_admin_route else api_key
+    return {"Authorization": f"Bearer {key}"} if key else {}
 # Cap on how much of a failed response body reaches the log.
 _ERROR_BODY_CHARS = 2000
 
@@ -147,10 +172,8 @@ def launch_server_process(
     p.start()
 
     base_url = server_args.url()
-    headers = {
-        "Content-Type": "application/json; charset=utf-8",
-        "Authorization": f"Bearer {server_args.api_key}",
-    }
+    headers = {"Content-Type": "application/json; charset=utf-8", **_auth_headers(server_args, "health")}
+    flush_cache_headers = {**headers, **_auth_headers(server_args, "flush_cache")}
 
     # Health check with overall timeout
     start_time = time.time()
@@ -182,7 +205,7 @@ def launch_server_process(
                 raise RuntimeError("Server process terminated unexpectedly during cache flush")
 
             try:
-                response = session.get(f"{base_url}/flush_cache", headers=headers, timeout=timeout)
+                response = session.get(f"{base_url}/flush_cache", headers=flush_cache_headers, timeout=timeout)
                 if response.status_code == 200:
                     break
             except requests.RequestException as e:
@@ -299,6 +322,8 @@ class HttpServerAdapter(EngineBase):
         method: str = "POST",
         timeout: float = DEFAULT_TIMEOUT,
         only_master: bool = True,
+        *,
+        max_attempts: Optional[int] = None,
     ) -> dict[str, Any]:
         """Make a HTTP request with retry logic and consistent error handling.
 
@@ -307,6 +332,9 @@ class HttpServerAdapter(EngineBase):
             payload (Optional[Dict[str, Any]], optional): The JSON payload to send.
                 Defaults to empty dict if None.
             method (str, optional): HTTP method to use. Defaults to "POST".
+            max_attempts (Optional[int]): Per-request attempt limit; defaults to
+                the adapter setting. Set to 1 for non-idempotent requests to
+                propagate transport failures immediately without retrying.
 
         Returns:
             Dict[str, Any]: The JSON response from the server
@@ -324,33 +352,50 @@ class HttpServerAdapter(EngineBase):
             return {}
 
         url = f"http://{self.server_args.host}:{self.server_args.port}/{endpoint}"
+        headers = _auth_headers(self.server_args, endpoint)
 
-        for attempt in range(self.max_attempts):
+        attempts = self.max_attempts if max_attempts is None else max_attempts
+        for attempt in range(attempts):
             try:
                 if method.upper() == "GET":
-                    response = requests.get(url, timeout=self.timeout)
+                    response = requests.get(url, headers=headers, timeout=self.timeout)
                 else:
-                    response = requests.post(url, json=payload or {}, timeout=self.timeout)
+                    response = requests.post(url, json=payload or {}, headers=headers, timeout=self.timeout)
 
                 response.raise_for_status()
                 return _read_response(response)
 
             except requests.exceptions.Timeout:
+                if max_attempts == 1:
+                    raise
                 logger.warning(f"Request to {endpoint} timed out (attempt {attempt + 1})")
             except requests.exceptions.ConnectionError:
+                if max_attempts == 1:
+                    raise
                 logger.warning(f"Connection error for {endpoint} (attempt {attempt + 1})")
             except requests.exceptions.HTTPError as e:
                 _log_error_body(endpoint, e.response.status_code, e.response.text)
                 raise
             except Exception as e:
                 logger.error(f"Unexpected error for {endpoint}: {e}")
-                if attempt == self.max_attempts - 1:
+                if attempt == attempts - 1:
                     raise
 
-            if attempt < self.max_attempts - 1:
+            if attempt < attempts - 1:
                 time.sleep(self.retry_delay * (2**attempt))
 
-        raise RuntimeError(f"Failed to complete request to {endpoint} after {self.max_attempts} attempts")
+        raise RuntimeError(f"Failed to complete request to {endpoint} after {attempts} attempts")
+
+    def begin_weight_update(self, selector: str = "all") -> dict[str, Any]:
+        """Open a session once; a lost response leaves server state uncertain.
+
+        Do not retry or infer ownership of a session after a transport failure.
+        """
+        return self._make_request("begin_weight_update", {"selector": selector}, max_attempts=1)
+
+    def end_weight_update(self) -> dict[str, Any]:
+        """Finalize the weights in the current session."""
+        return self._make_request("end_weight_update", {})
 
     def update_weights_from_tensor(self, req: UpdateWeightsFromTensorReqInput) -> dict[str, Any]:
         """Update model weights from tensor data.
@@ -525,7 +570,9 @@ class HttpServerAdapter(EngineBase):
         for attempt in range(self.max_attempts * 2):  # Allow more retries for cache flush
             try:
                 response = requests.get(
-                    f"http://{self.server_args.host}:{self.server_args.port}/flush_cache", timeout=self.timeout
+                    f"http://{self.server_args.host}:{self.server_args.port}/flush_cache",
+                    headers=_auth_headers(self.server_args, "flush_cache"),
+                    timeout=self.timeout,
                 )
                 if response.status_code == 200:
                     return _read_response(response)
@@ -667,6 +714,8 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         method: str = "POST",
         timeout: float = DEFAULT_TIMEOUT,
         only_master: bool = True,
+        *,
+        max_attempts: Optional[int] = None,
     ) -> dict[str, Any]:
         """Make an async HTTP request with retry logic and consistent error handling.
 
@@ -675,6 +724,9 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             payload (Optional[Dict[str, Any]], optional): The JSON payload to send.
                 Defaults to empty dict if None.
             method (str, optional): HTTP method to use. Defaults to "POST".
+            max_attempts (Optional[int]): Per-request attempt limit; defaults to
+                the adapter setting. Set to 1 for non-idempotent requests to
+                propagate transport failures immediately without retrying.
 
         Returns:
             Dict[str, Any]: The JSON response from the server
@@ -692,12 +744,14 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             return {}
 
         url = f"http://{self.server_args.host}:{self.server_args.port}/{endpoint}"
+        headers = _auth_headers(self.server_args, endpoint)
 
-        for attempt in range(self.max_attempts):
+        attempts = self.max_attempts if max_attempts is None else max_attempts
+        for attempt in range(attempts):
             try:
                 async with self._get_session() as session:
                     if method.upper() == "GET":
-                        async with session.get(url, timeout=timeout) as response:
+                        async with session.get(url, headers=headers, timeout=timeout) as response:
                             # Read the body here: it is gone once this block exits, and
                             # ClientResponseError does not carry it.
                             if response.status >= 400:
@@ -705,28 +759,32 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                                 response.raise_for_status()
                             return await _read_async_response(response)
                     else:
-                        async with session.post(url, json=payload or {}, timeout=timeout) as response:
+                        async with session.post(url, json=payload or {}, headers=headers, timeout=timeout) as response:
                             if response.status >= 400:
                                 _log_error_body(endpoint, response.status, await response.text())
                                 response.raise_for_status()
                             return await _read_async_response(response)
 
             except asyncio.TimeoutError:
+                if max_attempts == 1:
+                    raise
                 logger.warning(f"Async request to {endpoint} timed out (attempt {attempt + 1})")
             except aiohttp.ClientConnectorError:
+                if max_attempts == 1:
+                    raise
                 logger.warning(f"Connection error for {endpoint} (attempt {attempt + 1})")
             except aiohttp.ClientResponseError as e:
                 logger.error(f"HTTP error for {endpoint}: {e}")
                 raise
             except Exception as e:
                 logger.error(f"Unexpected error for {endpoint}: {e}")
-                if attempt == self.max_attempts - 1:
+                if attempt == attempts - 1:
                     raise
 
-            if attempt < self.max_attempts - 1:
+            if attempt < attempts - 1:
                 await asyncio.sleep(self.retry_delay * (2**attempt))
 
-        raise RuntimeError(f"Failed to complete async request to {endpoint} after {self.max_attempts} attempts")
+        raise RuntimeError(f"Failed to complete async request to {endpoint} after {attempts} attempts")
 
     async def release_memory_occupation(self, tags: Optional[list[str]] = None) -> dict[str, Any]:
         """Release GPU memory occupation temporarily (async version).
@@ -754,6 +812,17 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             Dict[str, Any]: Server response indicating memory resume status
         """
         return await self._make_async_request("resume_memory_occupation", {"tags": tags})
+
+    async def begin_weight_update(self, selector: str = "all") -> dict[str, Any]:
+        """Open a session once; a lost response leaves server state uncertain.
+
+        Do not retry or infer ownership of a session after a transport failure.
+        """
+        return await self._make_async_request("begin_weight_update", {"selector": selector}, max_attempts=1)
+
+    async def end_weight_update(self) -> dict[str, Any]:
+        """Finalize the weights in the current session."""
+        return await self._make_async_request("end_weight_update", {})
 
     async def update_weights_from_tensor(
         self,
@@ -834,7 +903,7 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             try:
                 async with self._get_session() as session:
                     url = f"http://{self.server_args.host}:{self.server_args.port}/flush_cache"
-                    async with session.get(url) as response:
+                    async with session.get(url, headers=_auth_headers(self.server_args, "flush_cache")) as response:
                         if response.status == 200:
                             return await _read_async_response(response)
             except Exception as e:

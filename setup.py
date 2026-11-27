@@ -44,6 +44,7 @@ install_requires = [
     "wandb",
     "packaging>=20.0",
     "tensorboard",
+    "TransferQueue==0.1.12"
 ]
 
 TEST_REQUIRES = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]

@@ -366,6 +366,7 @@ class TestHttpServerEngineAdapter:
             mock_post.assert_called_with(
                 "http://localhost:8000/test_endpoint",
                 json={"param": "value"},
+                headers={},
                 timeout=adapter.timeout,
             )
 
@@ -382,7 +383,7 @@ class TestHttpServerEngineAdapter:
             result = adapter._make_request("test_endpoint", method="GET")
 
             assert result == {"data": "test"}
-            mock_get.assert_called_with("http://localhost:8000/test_endpoint", timeout=adapter.timeout)
+            mock_get.assert_called_with("http://localhost:8000/test_endpoint", headers={}, timeout=adapter.timeout)
 
     def test_make_request_non_master(self, mock_launch_server_process):
         """Test request from non-master node returns empty dict."""
@@ -757,7 +758,7 @@ class TestAsyncHttpServerEngineAdapter:
 
             # Verify post was called
             mock_session.post.assert_called_once_with(
-                "http://localhost:8000/test_endpoint", json={"param": "value"}, timeout=adapter.timeout
+                "http://localhost:8000/test_endpoint", json={"param": "value"}, headers={}, timeout=adapter.timeout
             )
 
     @pytest.mark.asyncio
@@ -787,7 +788,9 @@ class TestAsyncHttpServerEngineAdapter:
 
             # Validate
             assert result == {"data": "test"}
-            mock_session.get.assert_called_once_with("http://localhost:8000/test_endpoint", timeout=adapter.timeout)
+            mock_session.get.assert_called_once_with(
+                "http://localhost:8000/test_endpoint", headers={}, timeout=adapter.timeout
+            )
 
     @pytest.mark.asyncio
     async def test_make_async_request_non_master(self, mock_launch_server_process):
