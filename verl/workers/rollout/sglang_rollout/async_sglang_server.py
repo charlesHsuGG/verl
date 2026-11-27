@@ -65,6 +65,8 @@ from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_con
 from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
     default_moe_runner_backend,
+    default_stop_token_ids,
+    lora_base_kept_on_sleep,
     lora_rank_of,
     lora_served_as_adapter,
     sglang_lora_target_modules,
@@ -170,6 +172,7 @@ class SGLangHttpServer:
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+        self._default_stop_token_ids = default_stop_token_ids(self.model_config)
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
         if self.config.max_model_len is None:
             self.config.max_model_len = max_position_embeddings
@@ -335,6 +338,7 @@ class SGLangHttpServer:
         args = {
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
+            "context_length": self.config.max_model_len,
             "mem_fraction_static": self.config.gpu_memory_utilization,
             "disable_cuda_graph": self.config.enforce_eager,
             "enable_memory_saver": True,
@@ -494,8 +498,9 @@ class SGLangHttpServer:
             # In hybrid mode, rollout is wake up in `update_weights`
             raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            # Resume exactly what sleep() released; adapter mode keeps the base weights resident.
-            tags = ["kv_cache"] if self.lora_as_adapter else ["kv_cache", "weights"]
+            # Resume exactly what sleep() released; adapter mode keeps the base weights resident
+            # unless lora.resync_base is set.
+            tags = ["kv_cache"] if lora_base_kept_on_sleep(self.model_config) else ["kv_cache", "weights"]
             obj = ResumeMemoryOccupationReqInput(tags=tags)
             await self.tokenizer_manager.resume_memory_occupation(obj, None)
             await self.tokenizer_manager.flush_cache()
@@ -519,8 +524,9 @@ class SGLangHttpServer:
 
         # When using LoRA as adapter (merge=False), only release kv_cache —
         # keep base weights in GPU so we only need to sync adapter deltas.
+        # With lora.resync_base, the base is re-synced on every update, so release it too.
         # Mirrors the vLLM sleep() pattern in vllm_async_server.py.
-        if self.lora_as_adapter:
+        if lora_base_kept_on_sleep(self.model_config):
             tags = ["kv_cache"]
         else:
             tags = ["kv_cache", "weights"]
@@ -634,6 +640,11 @@ class SGLangHttpServer:
             f"max_new_tokens {max_new_tokens} exceeds available context space {max_possible_tokens}"
         )
         sampling_params["max_new_tokens"] = max_new_tokens
+        # Forward rollout.ignore_eos and default EOS IDs (SGLang skips tokenizer init by default).
+        sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
+        if not sampling_params.get("ignore_eos") and self._default_stop_token_ids:
+            caller_stops = sampling_params.get("stop_token_ids") or ()
+            sampling_params["stop_token_ids"] = list(dict.fromkeys((*caller_stops, *self._default_stop_token_ids)))
         return_logprob = sampling_params.pop("logprobs", False)
 
         # vLLM-style "prompt_logprobs=K" from the distillation teacher: request
